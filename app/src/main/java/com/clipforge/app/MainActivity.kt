@@ -3126,7 +3126,15 @@ private fun buildEditedItems(
         activeCaptions.forEach { caption ->
             boundaries.add(caption.startMs.coerceIn(0L, duration))
             boundaries.add(caption.endMs.coerceIn(0L, duration))
+            caption.tokens.forEach { token ->
+                boundaries.add(token.startMs.coerceIn(0L, duration))
+                boundaries.add(token.endMs.coerceIn(0L, duration))
+            }
         }
+        boundaries.add((clip.audioFadeInMs * clip.speed).toLong().coerceIn(0L, duration))
+        boundaries.add((duration - (clip.audioFadeOutMs * clip.speed).toLong()).coerceIn(0L, duration))
+        boundaries.add(duration / 3L)
+        boundaries.add(duration * 2L / 3L)
         activePhotoLayers.forEach { layer ->
             val layerStartInSource = ((layer.startMs - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong()
             val layerEndInSource = ((layer.endMs - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong()
@@ -3240,7 +3248,7 @@ private fun buildEditedItems(
             }
             val activeCaption = activeCaptions.firstOrNull { mid >= it.startMs && mid < it.endMs }
             if (activeCaption != null && activeCaption.text.isNotBlank()) {
-                val styledCaption = styledCaptionText(activeCaption.text, captionStyle)
+                val styledCaption = styledCaptionTextAtTime(activeCaption, captionStyle, mid.toLong())
                 val captionSettings = StaticOverlaySettings.Builder()
                     .setBackgroundFrameAnchor(0f, captionAnchorY(captionPosition))
                     .setOverlayFrameAnchor(0f, 0f)
@@ -3265,7 +3273,7 @@ private fun buildEditedItems(
                 .setEndPositionMs(clip.startMs + relativeEnd)
                 .build()
             val mediaItem = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
-            val sourceGain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
+            val sourceGain = GainProcessor(DefaultGainProvider.Builder(clipAudioGain(clip, sourceVolume, fraction, mid, duration)).build())
             result.add(
                 EditedMediaItem.Builder(mediaItem)
                     .setEffects(Effects(listOf(sourceGain), effects))
@@ -3515,6 +3523,10 @@ private fun buildEditedAudioItems(
     val duration = clip.durationMs.coerceAtLeast(1L)
     val boundaries = sortedSetOf(0L, duration)
     for (step in 1..12) boundaries.add(duration * step / 13L)
+    boundaries.add((clip.audioFadeInMs * clip.speed).toLong().coerceIn(0L, duration))
+    boundaries.add((duration - (clip.audioFadeOutMs * clip.speed).toLong()).coerceIn(0L, duration))
+    boundaries.add(duration / 3L)
+    boundaries.add(duration * 2L / 3L)
     val points = boundaries.toList()
     for (pointIndex in 0 until points.lastIndex) {
         val relativeStart = points[pointIndex]
@@ -3539,7 +3551,7 @@ private fun buildEditedAudioItems(
             .setEndPositionMs(clip.startMs + relativeEnd)
             .build()
         val item = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
-        val gain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
+        val gain = GainProcessor(DefaultGainProvider.Builder(clipAudioGain(clip, sourceVolume, fraction, mid, duration)).build())
         result.add(
             EditedMediaItem.Builder(item)
                 .setRemoveVideo(true)
@@ -3549,6 +3561,103 @@ private fun buildEditedAudioItems(
         )
     }
     return result
+}
+
+
+private fun clipAudioGain(clip: Clip, baseVolume: Float, fraction: Float, sourceMidMs: Float, sourceDurationMs: Long): Float {
+    val keyVolume = interpolateThree(
+        clip.audioVolumeStart, clip.audioVolumeMid, clip.audioVolumeEnd, fraction, clip.motionCurve
+    ).coerceIn(0f, 1f)
+    val timelineMidMs = (sourceMidMs / clip.speed.coerceAtLeast(0.25f)).toLong().coerceAtLeast(0L)
+    val renderedDuration = renderedDurationEstimateMs(clip).coerceAtLeast(1L)
+    val fadeIn = clip.audioFadeInMs.coerceIn(0L, renderedDuration)
+    val fadeOut = clip.audioFadeOutMs.coerceIn(0L, renderedDuration)
+    val fadeInGain = if (fadeIn > 0L) (timelineMidMs.toFloat() / fadeIn.toFloat()).coerceIn(0f, 1f) else 1f
+    val fadeOutGain = if (fadeOut > 0L) ((renderedDuration - timelineMidMs).toFloat() / fadeOut.toFloat()).coerceIn(0f, 1f) else 1f
+    return (baseVolume.coerceIn(0f, 1f) * keyVolume * fadeInGain * fadeOutGain).coerceIn(0f, 1f)
+}
+
+private fun mediaDurationMs(context: Context, uri: Uri): Long {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+    } catch (_: Exception) {
+        0L
+    } finally {
+        runCatching { retriever.release() }
+    }
+}
+
+private fun buildMusicItems(
+    context: Context,
+    musicUri: Uri,
+    projectDurationMs: Long,
+    volume: Float,
+    fadeInMs: Long,
+    fadeOutMs: Long,
+    voiceoverUri: Uri?
+): List<EditedMediaItem> {
+    val musicDurationMs = mediaDurationMs(context, musicUri)
+    if (musicDurationMs < 100L || projectDurationMs < 100L) return emptyList()
+    val projectDuration = projectDurationMs.coerceAtLeast(100L)
+    val fadeIn = fadeInMs.coerceIn(0L, projectDuration / 2L)
+    val fadeOut = fadeOutMs.coerceIn(0L, projectDuration / 2L)
+    val voiceDurationMs = voiceoverUri?.let { mediaDurationMs(context, it) } ?: 0L
+    val boundaries = sortedSetOf(0L, projectDuration)
+    var loopBoundary = musicDurationMs
+    while (loopBoundary < projectDuration) {
+        boundaries.add(loopBoundary)
+        loopBoundary += musicDurationMs
+    }
+    if (fadeIn > 0L) {
+        var point = 100L
+        while (point < fadeIn) {
+            boundaries.add(point)
+            point += 100L
+        }
+        boundaries.add(fadeIn)
+    }
+    val fadeOutStart = (projectDuration - fadeOut).coerceAtLeast(0L)
+    if (fadeOut > 0L) {
+        boundaries.add(fadeOutStart)
+        var point = fadeOutStart + 100L
+        while (point < projectDuration) {
+            boundaries.add(point)
+            point += 100L
+        }
+    }
+    if (voiceDurationMs in 1 until projectDuration) boundaries.add(voiceDurationMs)
+
+    val points = boundaries.toList()
+    val items = mutableListOf<EditedMediaItem>()
+    for (index in 0 until points.lastIndex) {
+        val globalStart = points[index]
+        val globalEnd = points[index + 1]
+        if (globalEnd <= globalStart) continue
+        val sourceStart = globalStart % musicDurationMs
+        val length = (globalEnd - globalStart).coerceAtMost(musicDurationMs - sourceStart)
+        val sourceEnd = sourceStart + length
+        if (length < 1L || sourceEnd <= sourceStart) continue
+        val midpoint = (globalStart + globalEnd) / 2f
+        val fadeInGain = if (fadeIn > 0L) (midpoint / fadeIn.toFloat()).coerceIn(0f, 1f) else 1f
+        val fadeOutGain = if (fadeOut > 0L) ((projectDuration - midpoint) / fadeOut.toFloat()).coerceIn(0f, 1f) else 1f
+        val duck = if (voiceoverUri != null && voiceDurationMs > 0L && midpoint < voiceDurationMs) 0.38f else 1f
+        val finalGain = (volume.coerceIn(0f, 1f) * fadeInGain * fadeOutGain * duck).coerceIn(0f, 1f)
+        val clipping = MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionMs(sourceStart)
+            .setEndPositionMs(sourceEnd)
+            .build()
+        val item = MediaItem.Builder().setUri(musicUri).setClippingConfiguration(clipping).build()
+        val gain = GainProcessor(DefaultGainProvider.Builder(finalGain).build())
+        items.add(
+            EditedMediaItem.Builder(item)
+                .setRemoveVideo(true)
+                .setEffects(Effects(listOf(gain), emptyList()))
+                .build()
+        )
+    }
+    return items
 }
 
 private fun toSrtTimestamp(milliseconds: Long): String {
