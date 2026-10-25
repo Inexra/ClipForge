@@ -199,7 +199,9 @@ private data class PhotoLayer(
     val scale: Float = 0.30f,
     val opacity: Float = 1f,
     val rotation: Float = 0f,
-    val fullFrame: Boolean = false
+    val fullFrame: Boolean = false,
+    val textContent: String? = null,
+    val textStyle: String = "Classic"
 )
 
 private data class Project(
@@ -688,6 +690,32 @@ private fun ClipForgeApp() {
     fun importMusic() { musicPicker.launch(arrayOf("audio/*")) }
     fun importPhotoLayers() { photoLayerPicker.launch(arrayOf("image/*")) }
 
+    fun addTextSticker() {
+        if (clips.isEmpty()) {
+            message = "Import a video before adding a text layer."
+            return
+        }
+        val placeholderUri = textLayerPlaceholderUri(context)
+        val duration = timelineDurationMs
+        val start = timelinePositionMs.coerceIn(0L, (duration - 100L).coerceAtLeast(0L))
+        val end = (start + 5_000L).coerceAtMost(duration).coerceAtLeast(start + 100L)
+        recordUndo()
+        photoLayers = photoLayers + PhotoLayer(
+            uri = placeholderUri,
+            name = "Text sticker",
+            startMs = start,
+            endMs = end,
+            position = "bottom-right",
+            scale = 0.5f,
+            opacity = 1f,
+            rotation = 0f,
+            fullFrame = false,
+            textContent = "Your text",
+            textStyle = captionStyle
+        )
+        message = "Text sticker added. Edit its wording, style and timing in Layers."
+    }
+
     fun generateAutoCaptions() {
         if (captioning || clips.isEmpty()) {
             if (clips.isEmpty()) message = "Import a video before generating captions."
@@ -1050,6 +1078,7 @@ private fun ClipForgeApp() {
                     timelineDurationMs = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L),
                     message = message,
                     onAdd = ::importPhotoLayers,
+                    onAddText = ::addTextSticker,
                     onUpdate = { layer -> photoLayers = photoLayers.map { if (it.id == layer.id) layer else it } },
                     onDelete = { id -> photoLayers = photoLayers.filterNot { it.id == id } }
                 )
@@ -1919,6 +1948,23 @@ private fun CaptionsPanel(
     }
 }
 
+private fun textLayerPlaceholderUri(context: Context): Uri {
+    val file = File(context.filesDir, "clipforge_text_layer.png")
+    if (!file.exists()) {
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        try {
+            file.outputStream().use { output ->
+                if (!bitmap.compress(CompressFormat.PNG, 100, output)) {
+                    throw IllegalStateException("Could not initialize the text-layer placeholder.")
+                }
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+    return Uri.fromFile(file)
+}
+
 private fun styledCaptionText(text: String, style: String): SpannableString {
     return SpannableString(text.trim()).apply {
         if (length > 0) {
@@ -2108,6 +2154,7 @@ private fun LayersPanel(
     timelineDurationMs: Long,
     message: String?,
     onAdd: () -> Unit,
+    onAddText: () -> Unit,
     onUpdate: (PhotoLayer) -> Unit,
     onDelete: (String) -> Unit
 ) {
@@ -2123,6 +2170,15 @@ private fun LayersPanel(
             Icon(Icons.Default.Add, null)
             Spacer(Modifier.width(8.dp))
             Text("Add images / logos", fontWeight = FontWeight.Bold)
+        }
+        OutlinedButton(
+            onClick = onAddText,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            shape = RoundedCornerShape(14.dp)
+        ) {
+            Icon(Icons.Default.Edit, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Add text sticker")
         }
         Text("Timeline length: " + time(timelineDurationMs), color = Muted, fontSize = 11.sp)
         if (layers.isEmpty()) {
@@ -2141,7 +2197,7 @@ private fun LayersPanel(
                             Spacer(Modifier.width(9.dp))
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(
-                                    (if (layer.fullFrame) "FREEZE FRAME " else "OVERLAY ") + (index + 1),
+                                    (if (layer.fullFrame) "FREEZE FRAME " else if (layer.textContent != null) "TEXT STICKER " else "OVERLAY ") + (index + 1),
                                     color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp
                                 )
                                 Text(layer.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -2152,6 +2208,32 @@ private fun LayersPanel(
                                 tint = Color(0xFFFF8D8D),
                                 modifier = Modifier.size(20.dp).clickable { onDelete(layer.id) }
                             )
+                        }
+                        if (layer.textContent != null) {
+                            OutlinedTextField(
+                                value = layer.textContent,
+                                onValueChange = { onUpdate(layer.copy(textContent = it)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Text sticker wording") },
+                                placeholder = { Text("Type overlay text…") },
+                                minLines = 1,
+                                maxLines = 3,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            Text("TEXT STYLE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("Classic", "Yellow Pop", "Neon", "Minimal").forEach { style ->
+                                    val active = layer.textStyle == style
+                                    Surface(
+                                        modifier = Modifier.clip(RoundedCornerShape(9.dp)).clickable { onUpdate(layer.copy(textStyle = style)) },
+                                        color = if (active) Lime else PanelAlt,
+                                        shape = RoundedCornerShape(9.dp)
+                                    ) {
+                                        Text(style, modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+                                            color = if (active) Bg else Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("IN", color = Muted, fontSize = 11.sp)
@@ -2222,39 +2304,55 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
     val active = layers.filter { timelinePositionMs >= it.startMs && timelinePositionMs < it.endMs }
     Box(Modifier.fillMaxSize()) {
         active.forEach { layer ->
-            val context = LocalContext.current
-            val bitmap by produceState<Bitmap?>(initialValue = null, key1 = layer.uri) {
-                value = withContext(Dispatchers.IO) {
-                    runCatching {
-                        context.contentResolver.openInputStream(layer.uri)?.use { BitmapFactory.decodeStream(it) }
-                    }.getOrNull()
-                }
+            val alignment = when (layer.position) {
+                "top-left" -> Alignment.TopStart
+                "top-right" -> Alignment.TopEnd
+                "center" -> Alignment.Center
+                "bottom-left" -> Alignment.BottomStart
+                else -> Alignment.BottomEnd
             }
-            if (bitmap != null) {
-                val alignment = when (layer.position) {
-                    "top-left" -> Alignment.TopStart
-                    "top-right" -> Alignment.TopEnd
-                    "center" -> Alignment.Center
-                    "bottom-left" -> Alignment.BottomStart
-                    else -> Alignment.BottomEnd
+            if (!layer.textContent.isNullOrBlank()) {
+                Text(
+                    text = layer.textContent,
+                    color = captionComposeTextColor(layer.textStyle),
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = (34f * layer.scale).sp,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.align(alignment).padding(8.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(captionComposeBackground(layer.textStyle))
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                        .graphicsLayer(rotationZ = layer.rotation, alpha = layer.opacity.coerceIn(0f, 1f))
+                )
+            } else {
+                val context = LocalContext.current
+                val bitmap by produceState<Bitmap?>(initialValue = null, key1 = layer.uri) {
+                    value = withContext(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openInputStream(layer.uri)?.use { BitmapFactory.decodeStream(it) }
+                        }.getOrNull()
+                    }
                 }
-                if (layer.fullFrame) {
-                    Image(
-                        bitmap = bitmap!!.asImageBitmap(),
-                        contentDescription = layer.name,
-                        alpha = layer.opacity.coerceIn(0f, 1f),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize().graphicsLayer(rotationZ = layer.rotation)
-                    )
-                } else {
-                    Image(
-                        bitmap = bitmap!!.asImageBitmap(),
-                        contentDescription = layer.name,
-                        alpha = layer.opacity.coerceIn(0f, 1f),
-                        modifier = Modifier.align(alignment).padding(8.dp)
-                            .size((230f * layer.scale).dp)
-                            .graphicsLayer(rotationZ = layer.rotation)
-                    )
+                if (bitmap != null) {
+                    if (layer.fullFrame) {
+                        Image(
+                            bitmap = bitmap!!.asImageBitmap(),
+                            contentDescription = layer.name,
+                            alpha = layer.opacity.coerceIn(0f, 1f),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize().graphicsLayer(rotationZ = layer.rotation)
+                        )
+                    } else {
+                        Image(
+                            bitmap = bitmap!!.asImageBitmap(),
+                            contentDescription = layer.name,
+                            alpha = layer.opacity.coerceIn(0f, 1f),
+                            modifier = Modifier.align(alignment).padding(8.dp)
+                                .size((230f * layer.scale).dp)
+                                .graphicsLayer(rotationZ = layer.rotation)
+                        )
+                    }
                 }
             }
         }
@@ -2495,7 +2593,11 @@ private fun buildEditedItems(
                     .setAlphaScale(layer.opacity.coerceIn(0f, 1f))
                     .setRotationDegrees(layer.rotation.coerceIn(-180f, 180f))
                     .build()
-                overlays.add(BitmapOverlay.createStaticBitmapOverlay(context, layer.uri, layerSettings))
+                if (!layer.textContent.isNullOrBlank()) {
+                    overlays.add(TextOverlay.createStaticTextOverlay(styledCaptionText(layer.textContent, layer.textStyle), layerSettings))
+                } else {
+                    overlays.add(BitmapOverlay.createStaticBitmapOverlay(context, layer.uri, layerSettings))
+                }
             }
             if (titleText.isNotBlank()) {
                 val styledTitle = SpannableString(titleText.trim()).apply {
@@ -2697,7 +2799,9 @@ private fun loadProject(context: Context): Project {
                 scale = item.optDouble("scale", 0.30).toFloat().coerceIn(0.12f, 1f),
                 opacity = item.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
                 rotation = item.optDouble("rotation", 0.0).toFloat().coerceIn(-180f, 180f),
-                fullFrame = item.optBoolean("fullFrame", false)
+                fullFrame = item.optBoolean("fullFrame", false),
+                textContent = item.optString("textContent", "").takeIf { it.isNotBlank() },
+                textStyle = item.optString("textStyle", "Classic").takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal") } ?: "Classic"
             ))
         }
     }
@@ -2779,6 +2883,8 @@ private fun saveProject(context: Context, project: Project) {
             put("opacity", layer.opacity)
             put("rotation", layer.rotation)
             put("fullFrame", layer.fullFrame)
+            put("textContent", layer.textContent)
+            put("textStyle", layer.textStyle)
         })
     }
     val markerArray = JSONArray()
