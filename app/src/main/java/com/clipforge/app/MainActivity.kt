@@ -163,9 +163,12 @@ private data class Clip(
     val endMs: Long = sourceMs,
     val speed: Float = 1f,
     val zoomStart: Float = 1f,
+    val zoomMid: Float = 1f,
     val zoomEnd: Float = 1f,
     val rotationStart: Float = 0f,
+    val rotationMid: Float = 0f,
     val rotationEnd: Float = 0f,
+    val motionCurve: String = "Linear",
     val transition: String = "Cut",
     val speedCurve: String = "Constant",
     val cropZoom: Float = 1f,
@@ -1051,8 +1054,12 @@ private fun EditorPanel(
 ) {
     val keyframeFraction = if (selected == null || selected.durationMs <= 0L) 0f else
         (position.toFloat() / selected.durationMs.toFloat()).coerceIn(0f, 1f)
-    val previewZoom = selected?.let { it.zoomStart + (it.zoomEnd - it.zoomStart) * keyframeFraction } ?: 1f
-    val previewRotation = selected?.let { it.rotationStart + (it.rotationEnd - it.rotationStart) * keyframeFraction } ?: 0f
+    val previewZoom = selected?.let {
+        interpolateThree(it.zoomStart, it.zoomMid, it.zoomEnd, keyframeFraction, it.motionCurve)
+    } ?: 1f
+    val previewRotation = selected?.let {
+        interpolateThree(it.rotationStart, it.rotationMid, it.rotationEnd, keyframeFraction, it.motionCurve)
+    } ?: 0f
     val activeCaption = selected?.let { clip ->
         captions.firstOrNull { it.clipId == clip.id && position >= it.startMs && position < it.endMs }
     }
@@ -1532,6 +1539,43 @@ private fun MotionPanel(
                         onValueChange = { onClipChange(selected.copy(rotationStart = it)) },
                         valueRange = -180f..180f
                     )
+
+                    HorizontalDivider(color = PanelAlt)
+                    Text("MIDDLE KEYFRAME  •  50%", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Zoom", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2fx", selected.zoomMid), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.zoomMid,
+                        onValueChange = { onClipChange(selected.copy(zoomMid = it)) },
+                        valueRange = 1f..1.8f
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Rotation", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(selected.rotationMid.toInt().toString() + "°", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.rotationMid,
+                        onValueChange = { onClipChange(selected.copy(rotationMid = it)) },
+                        valueRange = -180f..180f
+                    )
+                    Text("Interpolation curve", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf("Linear", "Ease in", "Ease out", "Ease in/out").forEach { curve ->
+                            val active = selected.motionCurve == curve
+                            Surface(
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onClipChange(selected.copy(motionCurve = curve)) },
+                                color = if (active) Lime else PanelAlt,
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text(curve, modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                    color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
 
                     HorizontalDivider(color = PanelAlt)
                     Text("END KEYFRAME  •  LAST FRAME", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
@@ -2068,6 +2112,21 @@ private fun MessageStrip(message: String) {
     }
 }
 
+private fun interpolateThree(start: Float, middle: Float, end: Float, fraction: Float, curve: String): Float {
+    val clamped = fraction.coerceIn(0f, 1f)
+    val firstHalf = clamped < 0.5f
+    val from = if (firstHalf) start else middle
+    val to = if (firstHalf) middle else end
+    val raw = if (firstHalf) clamped * 2f else (clamped - 0.5f) * 2f
+    val eased = when (curve) {
+        "Ease in" -> raw * raw
+        "Ease out" -> 1f - (1f - raw) * (1f - raw)
+        "Ease in/out" -> raw * raw * (3f - 2f * raw)
+        else -> raw
+    }
+    return from + (to - from) * eased
+}
+
 private fun time(ms: Long): String {
     val sec = ms.coerceAtLeast(0L) / 1000L
     return String.format(Locale.US, "%02d:%02d", sec / 60L, sec % 60L)
@@ -2169,8 +2228,8 @@ private fun buildEditedItems(
                 override fun getSpeed(timeUs: Long): Float = segmentSpeed
                 override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
             }
-            val keyZoom = clip.zoomStart + (clip.zoomEnd - clip.zoomStart) * fraction
-            val keyRotation = clip.rotationStart + (clip.rotationEnd - clip.rotationStart) * fraction
+            val keyZoom = interpolateThree(clip.zoomStart, clip.zoomMid, clip.zoomEnd, fraction, clip.motionCurve)
+            val keyRotation = interpolateThree(clip.rotationStart, clip.rotationMid, clip.rotationEnd, fraction, clip.motionCurve)
             val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
                 (1f - mid / transitionLength.toFloat()).coerceIn(0f, 1f)
             } else 0f
@@ -2380,9 +2439,12 @@ private fun loadProject(context: Context): Project {
                     endMs = end,
                     speed = o.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 3f),
                     zoomStart = o.optDouble("zoomStart", 1.0).toFloat().coerceIn(1f, 1.8f),
+                    zoomMid = o.optDouble("zoomMid", 1.0).toFloat().coerceIn(1f, 1.8f),
                     zoomEnd = o.optDouble("zoomEnd", 1.0).toFloat().coerceIn(1f, 1.8f),
                     rotationStart = o.optDouble("rotationStart", 0.0).toFloat().coerceIn(-180f, 180f),
+                    rotationMid = o.optDouble("rotationMid", 0.0).toFloat().coerceIn(-180f, 180f),
                     rotationEnd = o.optDouble("rotationEnd", 0.0).toFloat().coerceIn(-180f, 180f),
+                    motionCurve = o.optString("motionCurve", "Linear").takeIf { it in listOf("Linear", "Ease in", "Ease out", "Ease in/out") } ?: "Linear",
                     transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut",
                     speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant",
                     cropZoom = o.optDouble("cropZoom", 1.0).toFloat().coerceIn(1f, 2.5f),
@@ -2469,9 +2531,12 @@ private fun saveProject(context: Context, project: Project) {
             put("end", clip.endMs)
             put("speed", clip.speed)
             put("zoomStart", clip.zoomStart)
+            put("zoomMid", clip.zoomMid)
             put("zoomEnd", clip.zoomEnd)
             put("rotationStart", clip.rotationStart)
+            put("rotationMid", clip.rotationMid)
             put("rotationEnd", clip.rotationEnd)
+            put("motionCurve", clip.motionCurve)
             put("transition", clip.transition)
             put("speedCurve", clip.speedCurve)
             put("cropZoom", clip.cropZoom)
