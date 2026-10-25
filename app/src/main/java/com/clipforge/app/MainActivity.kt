@@ -202,6 +202,13 @@ private data class Clip(
     val cropZoom: Float = 1f,
     val cropX: Float = 0f,
     val cropY: Float = 0f,
+    val animateCropPosition: Boolean = false,
+    val cropXStart: Float = 0f,
+    val cropXMid: Float = 0f,
+    val cropXEnd: Float = 0f,
+    val cropYStart: Float = 0f,
+    val cropYMid: Float = 0f,
+    val cropYEnd: Float = 0f,
     val audioVolumeStart: Float = 1f,
     val audioVolumeMid: Float = 1f,
     val audioVolumeEnd: Float = 1f,
@@ -1463,6 +1470,12 @@ private fun EditorPanel(
     val previewRotation = selected?.let {
         interpolateThree(it.rotationStart, it.rotationMid, it.rotationEnd, keyframeFraction, it.motionCurve)
     } ?: 0f
+    val previewCropX = selected?.let {
+        if (it.animateCropPosition) interpolateThree(it.cropXStart, it.cropXMid, it.cropXEnd, keyframeFraction, it.motionCurve) else it.cropX
+    } ?: 0f
+    val previewCropY = selected?.let {
+        if (it.animateCropPosition) interpolateThree(it.cropYStart, it.cropYMid, it.cropYEnd, keyframeFraction, it.motionCurve) else it.cropY
+    } ?: 0f
     val activeCaption = selected?.let { clip ->
         captions.firstOrNull { it.clipId == clip.id && position >= it.startMs && position < it.endMs }
     }
@@ -1662,8 +1675,8 @@ private fun EditorPanel(
                             modifier = Modifier.fillMaxSize().graphicsLayer(
                                 scaleX = previewZoom * (selected?.cropZoom ?: 1f),
                                 scaleY = previewZoom * (selected?.cropZoom ?: 1f),
-                                translationX = (selected?.cropX ?: 0f) * 120f,
-                                translationY = (selected?.cropY ?: 0f) * 120f,
+                                translationX = previewCropX * 120f,
+                                translationY = previewCropY * 120f,
                                 rotationZ = previewRotation
                             ),
                             factory = { ctx ->
@@ -2154,7 +2167,41 @@ private fun MotionPanel(
                         onValueChange = { onClipChange(selected.copy(cropY = it)) },
                         valueRange = -1f..1f
                     )
-                    OutlinedButton(onClick = { onClipChange(selected.copy(cropZoom = 1f, cropX = 0f, cropY = 0f)) },
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("Animate crop position", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("Pan horizontally/vertically through the clip.", color = Muted, fontSize = 10.sp)
+                        }
+                        Switch(checked = selected.animateCropPosition, onCheckedChange = { onClipChange(selected.copy(animateCropPosition = it)) })
+                    }
+                    if (selected.animateCropPosition) {
+                        listOf(
+                            "Start X" to selected.cropXStart, "Middle X" to selected.cropXMid, "End X" to selected.cropXEnd,
+                            "Start Y" to selected.cropYStart, "Middle Y" to selected.cropYMid, "End Y" to selected.cropYEnd
+                        ).forEach { (label, value) ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(label, color = Muted, fontSize = 11.sp)
+                                Spacer(Modifier.weight(1f))
+                                Text(value.toInt().toString(), color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Slider(
+                                value = value,
+                                onValueChange = { next ->
+                                    onClipChange(when (label) {
+                                        "Start X" -> selected.copy(cropXStart = next)
+                                        "Middle X" -> selected.copy(cropXMid = next)
+                                        "End X" -> selected.copy(cropXEnd = next)
+                                        "Start Y" -> selected.copy(cropYStart = next)
+                                        "Middle Y" -> selected.copy(cropYMid = next)
+                                        "End Y" -> selected.copy(cropYEnd = next)
+                                        else -> selected
+                                    })
+                                },
+                                valueRange = -1f..1f
+                            )
+                        }
+                    }
+                    OutlinedButton(onClick = { onClipChange(selected.copy(cropZoom = 1f, cropX = 0f, cropY = 0f, animateCropPosition = false, cropXStart = 0f, cropXMid = 0f, cropXEnd = 0f, cropYStart = 0f, cropYMid = 0f, cropYEnd = 0f)) },
                         shape = RoundedCornerShape(11.dp)) { Text("Reset crop") }
 
                     HorizontalDivider(color = PanelAlt)
@@ -3287,6 +3334,8 @@ private fun buildEditedItems(
 
         // These points create visible intermediate keyframes during export, rather than a UI-only animation.
         for (step in 1..12) boundaries.add(duration * step / 13L)
+        boundaries.add(duration / 3L)
+        boundaries.add(duration * 2L / 3L)
         activeCaptions.forEach { caption ->
             boundaries.add(caption.startMs.coerceIn(0L, duration))
             boundaries.add(caption.endMs.coerceIn(0L, duration))
@@ -3339,6 +3388,8 @@ private fun buildEditedItems(
             }
             val keyZoom = interpolateThree(clip.zoomStart, clip.zoomMid, clip.zoomEnd, fraction, clip.motionCurve)
             val keyRotation = interpolateThree(clip.rotationStart, clip.rotationMid, clip.rotationEnd, fraction, clip.motionCurve)
+            val keyCropX = if (clip.animateCropPosition) interpolateThree(clip.cropXStart, clip.cropXMid, clip.cropXEnd, fraction, clip.motionCurve) else clip.cropX
+            val keyCropY = if (clip.animateCropPosition) interpolateThree(clip.cropYStart, clip.cropYMid, clip.cropYEnd, fraction, clip.motionCurve) else clip.cropY
             val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
                 (1f - mid / transitionLength.toFloat()).coerceIn(0f, 1f)
             } else 0f
@@ -3360,8 +3411,8 @@ private fun buildEditedItems(
 
             val effects = mutableListOf<androidx.media3.common.Effect>()
             val cropHalf = 1f / clip.cropZoom.coerceIn(1f, 2.5f)
-            val cropCenterX = clip.cropX.coerceIn(-1f, 1f) * (1f - cropHalf)
-            val cropCenterY = clip.cropY.coerceIn(-1f, 1f) * (1f - cropHalf)
+            val cropCenterX = keyCropX.coerceIn(-1f, 1f) * (1f - cropHalf)
+            val cropCenterY = keyCropY.coerceIn(-1f, 1f) * (1f - cropHalf)
             if (clip.cropZoom > 1f || clip.cropX != 0f || clip.cropY != 0f) {
                 effects.add(Crop(cropCenterX - cropHalf, cropCenterX + cropHalf, cropCenterY - cropHalf, cropCenterY + cropHalf))
             }
@@ -3937,6 +3988,13 @@ private fun loadProject(context: Context): Project {
                     cropZoom = o.optDouble("cropZoom", 1.0).toFloat().coerceIn(1f, 2.5f),
                     cropX = o.optDouble("cropX", 0.0).toFloat().coerceIn(-1f, 1f),
                     cropY = o.optDouble("cropY", 0.0).toFloat().coerceIn(-1f, 1f),
+                    animateCropPosition = o.optBoolean("animateCropPosition", false),
+                    cropXStart = o.optDouble("cropXStart", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropXMid = o.optDouble("cropXMid", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropXEnd = o.optDouble("cropXEnd", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropYStart = o.optDouble("cropYStart", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropYMid = o.optDouble("cropYMid", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropYEnd = o.optDouble("cropYEnd", 0.0).toFloat().coerceIn(-1f, 1f),
                     audioVolumeStart = o.optDouble("audioVolumeStart", 1.0).toFloat().coerceIn(0f, 1f),
                     audioVolumeMid = o.optDouble("audioVolumeMid", 1.0).toFloat().coerceIn(0f, 1f),
                     audioVolumeEnd = o.optDouble("audioVolumeEnd", 1.0).toFloat().coerceIn(0f, 1f),
@@ -4061,6 +4119,13 @@ private fun saveProject(context: Context, project: Project) {
             put("cropZoom", clip.cropZoom)
             put("cropX", clip.cropX)
             put("cropY", clip.cropY)
+            put("animateCropPosition", clip.animateCropPosition)
+            put("cropXStart", clip.cropXStart)
+            put("cropXMid", clip.cropXMid)
+            put("cropXEnd", clip.cropXEnd)
+            put("cropYStart", clip.cropYStart)
+            put("cropYMid", clip.cropYMid)
+            put("cropYEnd", clip.cropYEnd)
             put("audioVolumeStart", clip.audioVolumeStart)
             put("audioVolumeMid", clip.audioVolumeMid)
             put("audioVolumeEnd", clip.audioVolumeEnd)
