@@ -1,37 +1,38 @@
 # ClipForge
 
-ClipForge is a native Android video-editor starter built with Kotlin and Jetpack Compose. The goal is a mobile-first editor inspired by modern short-form editing apps, with offline editing as the foundation and optional online AI tools later.
+ClipForge is a native Android video-editing app built with Kotlin, Jetpack Compose, ExoPlayer, and Media3 Transformer. Editing and rendering run on your phone; no account or paid backend is required for the current editor.
 
-## Current status
+## Features implemented
 
-This first commit is a **buildable UI starter**, not a full video editor yet. It includes a dark editor dashboard, project preview placeholder, editing-tool shortcuts, and bottom navigation. It does not yet import media, edit a real timeline, render videos, or call AI services.
+- Import multiple videos with the Android document picker.
+- Preview and scrub through individual clips.
+- Trim clip start/end points.
+- Split a clip at the playhead.
+- Rearrange clips and delete clips from the timeline.
+- Choose and preview background audio.
+- Loop background music across the video and optionally mute original clip audio.
+- Burn in a static title/caption overlay.
+- Adjust brightness.
+- Export MP4 (H.264/AAC) with Original, 9:16 Shorts, 16:9 Video, or 1:1 Square aspect presets.
+- Save rendered videos to Movies/ClipForge in Gallery and share them.
+- Autosave project clips, media references, and settings locally.
 
-## Build an APK without Android Studio
+## Get the APK without Android Studio
 
-1. Open the **Actions** tab in this repository.
-2. Select **Android APK**.
-3. Choose **Run workflow** if no run has started automatically, then run it on the `main` branch.
-4. Open the completed workflow run and download the `ClipForge-debug-apk` artifact.
-5. Extract the ZIP and install `app-debug.apk` on your Android phone. You may need to allow installs from your browser or file manager.
+1. Open the **Actions** tab.
+2. Open the latest **Android APK** workflow run.
+3. After it succeeds, download the **ClipForge-debug-apk** artifact.
+4. Extract the ZIP and install `app-debug.apk` on your Android phone. You may need to allow installs from your browser or file manager.
 
-Every push to `main` also triggers a build. No API secrets are required for this starter.
+Pushes to `main` trigger cloud APK builds. No API keys are needed for the editing features.
 
-## Technical setup
+## Build stack
 
-- Kotlin + Jetpack Compose
-- Android Gradle Plugin 8.9.2
-- Kotlin 2.0.21
-- Java 17
-- compileSdk / targetSdk 35; minSdk 26
-- GitHub Actions builds the debug APK in the cloud
+- Kotlin 2.2.0 / Compose compiler plugin
+- Android Gradle Plugin 8.10.1
+- JDK 17, Android SDK 36, minSdk 26
+- Jetpack Media3 1.11.1
 
-## Roadmap
+## Not yet equivalent to CapCut/VN
 
-1. Media picker and project creation
-2. Real timeline with clip trimming, splitting, and audio tracks
-3. Preview playback and export/render pipeline
-4. Text, captions, transitions, filters, and speed controls
-5. Optional AI-assisted captions and editing
-6. Export presets and device-performance tuning
-
-AI/provider secrets must stay on a trusted backend, never in the Android app source. Keep editing and project data usable offline wherever practical.
+This is a functional editing MVP, not a feature-for-feature clone. It does not yet have animated transitions, multi-layer independently timed captions, keyframes, advanced color grading, templates, AI auto-captions, cloud sync, or direct social publishing. Media support and export speed depend on the device's codec support and available storage.
