@@ -234,7 +234,11 @@ private data class PhotoLayer(
     val rotation: Float = 0f,
     val fullFrame: Boolean = false,
     val textContent: String? = null,
-    val textStyle: String = "Classic"
+    val textStyle: String = "Classic",
+    val animateOpacity: Boolean = false,
+    val opacityStart: Float = 1f,
+    val opacityMid: Float = 1f,
+    val opacityEnd: Float = 1f
 )
 
 private data class Project(
@@ -2759,6 +2763,14 @@ private fun WaveformBars(peaks: List<Float>, modifier: Modifier = Modifier) {
     }
 }
 
+private fun effectiveLayerOpacity(layer: PhotoLayer, timelinePositionMs: Long): Float {
+    if (!layer.animateOpacity) return layer.opacity.coerceIn(0f, 1f)
+    val duration = (layer.endMs - layer.startMs).coerceAtLeast(1L)
+    val fraction = ((timelinePositionMs - layer.startMs).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+    return (layer.opacity * interpolateThree(layer.opacityStart, layer.opacityMid, layer.opacityEnd, fraction, "Linear"))
+        .coerceIn(0f, 1f)
+}
+
 private fun layerAnchors(position: String): Pair<Float, Float> = when (position) {
     "top-left" -> -0.62f to 0.62f
     "top-right" -> 0.62f to 0.62f
@@ -2918,6 +2930,37 @@ private fun LayersPanel(
                         }
                         Slider(value = layer.opacity, onValueChange = { onUpdate(layer.copy(opacity = it)) }, valueRange = 0f..1f)
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Animate opacity", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text("Fade this layer through three keyframes.", color = Muted, fontSize = 10.sp)
+                            }
+                            Switch(checked = layer.animateOpacity, onCheckedChange = { onUpdate(layer.copy(animateOpacity = it)) })
+                        }
+                        if (layer.animateOpacity) {
+                            listOf(
+                                "Opacity · start" to layer.opacityStart,
+                                "Opacity · middle" to layer.opacityMid,
+                                "Opacity · end" to layer.opacityEnd
+                            ).forEach { (label, value) ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(label, color = Muted, fontSize = 11.sp)
+                                    Spacer(Modifier.weight(1f))
+                                    Text((value * 100).toInt().toString() + "%", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = value,
+                                    onValueChange = { next ->
+                                        onUpdate(when (label) {
+                                            "Opacity · start" -> layer.copy(opacityStart = next)
+                                            "Opacity · middle" -> layer.copy(opacityMid = next)
+                                            else -> layer.copy(opacityEnd = next)
+                                        })
+                                    },
+                                    valueRange = 0f..1f
+                                )
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Rotation", color = Muted, fontSize = 11.sp)
                             Spacer(Modifier.weight(1f))
                             Text(layer.rotation.toInt().toString() + "°", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -3004,6 +3047,7 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
     val active = layers.filter { timelinePositionMs >= it.startMs && timelinePositionMs < it.endMs }
     Box(Modifier.fillMaxSize()) {
         active.forEach { layer ->
+            val animatedOpacity = effectiveLayerOpacity(layer, timelinePositionMs)
             val alignment = when (layer.position) {
                 "top-left" -> Alignment.TopStart
                 "top-right" -> Alignment.TopEnd
@@ -3023,7 +3067,7 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
                         .clip(RoundedCornerShape(6.dp))
                         .background(captionComposeBackground(layer.textStyle))
                         .padding(horizontal = 8.dp, vertical = 5.dp)
-                        .graphicsLayer(rotationZ = layer.rotation, alpha = layer.opacity.coerceIn(0f, 1f))
+                        .graphicsLayer(rotationZ = layer.rotation, alpha = animatedOpacity)
                 )
             } else {
                 val context = LocalContext.current
@@ -3039,7 +3083,7 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
                         Image(
                             bitmap = bitmap!!.asImageBitmap(),
                             contentDescription = layer.name,
-                            alpha = layer.opacity.coerceIn(0f, 1f),
+                            alpha = animatedOpacity,
                             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                             modifier = Modifier.fillMaxSize().graphicsLayer(rotationZ = layer.rotation)
                         )
@@ -3047,7 +3091,7 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
                         Image(
                             bitmap = bitmap!!.asImageBitmap(),
                             contentDescription = layer.name,
-                            alpha = layer.opacity.coerceIn(0f, 1f),
+                            alpha = animatedOpacity,
                             modifier = Modifier.align(alignment).padding(8.dp)
                                 .size((230f * layer.scale).dp)
                                 .graphicsLayer(rotationZ = layer.rotation)
@@ -3260,6 +3304,11 @@ private fun buildEditedItems(
             val layerEndInSource = ((layer.endMs - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong()
             boundaries.add(layerStartInSource.coerceIn(0L, duration))
             boundaries.add(layerEndInSource.coerceIn(0L, duration))
+            val layerDuration = (layer.endMs - layer.startMs).coerceAtLeast(1L)
+            val opacityKeyOne = layer.startMs + layerDuration / 3L
+            val opacityKeyTwo = layer.startMs + layerDuration * 2L / 3L
+            boundaries.add(((opacityKeyOne - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong().coerceIn(0L, duration))
+            boundaries.add(((opacityKeyTwo - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong().coerceIn(0L, duration))
         }
         if (transitionLength > 0L) {
             for (step in 1..5) {
@@ -3345,7 +3394,7 @@ private fun buildEditedItems(
                     .setBackgroundFrameAnchor(anchorX, anchorY)
                     .setOverlayFrameAnchor(0f, 0f)
                     .setScale(if (layer.fullFrame) 1f else layer.scale.coerceIn(0.12f, 0.7f), if (layer.fullFrame) 1f else layer.scale.coerceIn(0.12f, 0.7f))
-                    .setAlphaScale(layer.opacity.coerceIn(0f, 1f))
+                    .setAlphaScale(effectiveLayerOpacity(layer, projectMidpointMs))
                     .setRotationDegrees(layer.rotation.coerceIn(-180f, 180f))
                     .build()
                 if (!layer.textContent.isNullOrBlank()) {
@@ -3948,7 +3997,11 @@ private fun loadProject(context: Context): Project {
                 rotation = item.optDouble("rotation", 0.0).toFloat().coerceIn(-180f, 180f),
                 fullFrame = item.optBoolean("fullFrame", false),
                 textContent = item.optString("textContent", "").takeIf { it.isNotBlank() },
-                textStyle = item.optString("textStyle", "Classic").takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal") } ?: "Classic"
+                textStyle = item.optString("textStyle", "Classic").takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal") } ?: "Classic",
+                animateOpacity = item.optBoolean("animateOpacity", false),
+                opacityStart = item.optDouble("opacityStart", 1.0).toFloat().coerceIn(0f, 1f),
+                opacityMid = item.optDouble("opacityMid", 1.0).toFloat().coerceIn(0f, 1f),
+                opacityEnd = item.optDouble("opacityEnd", 1.0).toFloat().coerceIn(0f, 1f)
             ))
         }
     }
@@ -4049,6 +4102,10 @@ private fun saveProject(context: Context, project: Project) {
             put("fullFrame", layer.fullFrame)
             put("textContent", layer.textContent)
             put("textStyle", layer.textStyle)
+            put("animateOpacity", layer.animateOpacity)
+            put("opacityStart", layer.opacityStart)
+            put("opacityMid", layer.opacityMid)
+            put("opacityEnd", layer.opacityEnd)
         })
     }
     val markerArray = JSONArray()
