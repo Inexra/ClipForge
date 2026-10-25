@@ -2169,12 +2169,6 @@ private fun buildEditedItems(
                 override fun getSpeed(timeUs: Long): Float = segmentSpeed
                 override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
             }
-            val cropHalf = 1f / clip.cropZoom.coerceIn(1f, 2.5f)
-            val cropCenterX = clip.cropX.coerceIn(-1f, 1f) * (1f - cropHalf)
-            val cropCenterY = clip.cropY.coerceIn(-1f, 1f) * (1f - cropHalf)
-            if (clip.cropZoom > 1f || clip.cropX != 0f || clip.cropY != 0f) {
-                effects.add(Crop(cropCenterX - cropHalf, cropCenterX + cropHalf, cropCenterY - cropHalf, cropCenterY + cropHalf))
-            }
             val keyZoom = clip.zoomStart + (clip.zoomEnd - clip.zoomStart) * fraction
             val keyRotation = clip.rotationStart + (clip.rotationEnd - clip.rotationStart) * fraction
             val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
@@ -2197,6 +2191,12 @@ private fun buildEditedItems(
             applyTransition(transitionOut, outRatio)
 
             val effects = mutableListOf<androidx.media3.common.Effect>()
+            val cropHalf = 1f / clip.cropZoom.coerceIn(1f, 2.5f)
+            val cropCenterX = clip.cropX.coerceIn(-1f, 1f) * (1f - cropHalf)
+            val cropCenterY = clip.cropY.coerceIn(-1f, 1f) * (1f - cropHalf)
+            if (clip.cropZoom > 1f || clip.cropX != 0f || clip.cropY != 0f) {
+                effects.add(Crop(cropCenterX - cropHalf, cropCenterX + cropHalf, cropCenterY - cropHalf, cropCenterY + cropHalf))
+            }
             val adjustedBrightness = (brightness + transitionBrightness).coerceIn(-1f, 1f)
             if (adjustedBrightness != 0f) effects.add(Brightness(adjustedBrightness))
             val scale = (keyZoom * transitionScale).coerceIn(0.75f, 2.2f)
