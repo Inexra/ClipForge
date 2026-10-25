@@ -1033,6 +1033,18 @@ private fun ClipForgeApp() {
     fun exportVideo() {
         if (clips.isEmpty() || exporting) return
         player.pause()
+        val timelineMs = clipTimelineDurationMs(clips)
+        val (requestedVideoBitrate, requestedAudioBitrate) = exportBitrates(format, exportQuality)
+        val estimatedBytes = ((timelineMs / 1_000.0) * (requestedVideoBitrate + requestedAudioBitrate) / 8.0 * 2.1).toLong() +
+            96L * 1024L * 1024L
+        val availableBytes = StatFs(context.cacheDir.absolutePath).availableBytes
+        if (availableBytes < estimatedBytes) {
+            message = "Not enough free storage for a safe render. Estimated need: " +
+                (estimatedBytes / (1024L * 1024L)) + " MB; available: " +
+                (availableBytes / (1024L * 1024L)) + " MB. Free space or choose Saver quality/shorter clips."
+            return
+        }
+        exportProgress = 0
         val folder = File(context.cacheDir, "clipforge")
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
@@ -1097,11 +1109,30 @@ private fun ClipForgeApp() {
                 compositorSettings = ClipForgeVideoCompositorSettings(trackFades)
             }
             music?.let { audioUri ->
-                val audioGain = GainProcessor(DefaultGainProvider.Builder(musicVolume.coerceIn(0f, 1f)).build())
-                val adjustedAudio = EditedMediaItem.Builder(MediaItem.fromUri(audioUri))
-                    .setEffects(Effects(listOf(audioGain), emptyList()))
-                    .build()
-                sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(adjustedAudio)).buildUpon().setIsLooping(true).build())
+                val projectDuration = clipTimelineDurationMs(clips)
+                if (musicFadeInMs > 0L || musicFadeOutMs > 0L || (duckMusicUnderVoiceover && voiceover != null)) {
+                    val musicItems = buildMusicItems(
+                        context = context,
+                        musicUri = audioUri,
+                        projectDurationMs = projectDuration,
+                        volume = musicVolume,
+                        fadeInMs = musicFadeInMs,
+                        fadeOutMs = musicFadeOutMs,
+                        voiceoverUri = if (duckMusicUnderVoiceover) voiceover else null
+                    )
+                    if (musicItems.isNotEmpty()) sequenceList.add(EditedMediaItemSequence.withAudioFrom(musicItems))
+                    else {
+                        val gain = GainProcessor(DefaultGainProvider.Builder(musicVolume.coerceIn(0f, 1f)).build())
+                        val adjusted = EditedMediaItem.Builder(MediaItem.fromUri(audioUri)).setEffects(Effects(listOf(gain), emptyList())).build()
+                        sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(adjusted)).buildUpon().setIsLooping(true).build())
+                    }
+                } else {
+                    val audioGain = GainProcessor(DefaultGainProvider.Builder(musicVolume.coerceIn(0f, 1f)).build())
+                    val adjustedAudio = EditedMediaItem.Builder(MediaItem.fromUri(audioUri))
+                        .setEffects(Effects(listOf(audioGain), emptyList()))
+                        .build()
+                    sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(adjustedAudio)).buildUpon().setIsLooping(true).build())
+                }
             }
             voiceover?.let { voiceUri ->
                 val voiceGain = GainProcessor(DefaultGainProvider.Builder(voiceoverVolume.coerceIn(0f, 1f)).build())
@@ -1136,6 +1167,7 @@ private fun ClipForgeApp() {
                             try {
                                 val savedUri = withContext(Dispatchers.IO) { saveToGallery(context, output) }
                                 outputUri = savedUri
+                                exportProgress = 100
                                 message = "Export complete. Saved to Movies/ClipForge."
                             } catch (error: Exception) {
                                 message = "Rendered, but Gallery save failed: " + (error.message ?: "unknown error")
@@ -1149,6 +1181,7 @@ private fun ClipForgeApp() {
 
                     override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
                         exporting = false
+                        exportProgress = 0
                         transformer = null
                         message = "Export failed: " + (exportException.message ?: "unsupported media or codec")
                         output.delete()
@@ -1157,8 +1190,20 @@ private fun ClipForgeApp() {
                 .build()
             transformer = worker
             worker.start(composition, output.absolutePath)
+            scope.launch {
+                val holder = ProgressHolder()
+                while (exporting && transformer === worker) {
+                    val state = runCatching { worker.getProgress(holder) }
+                        .getOrDefault(Transformer.PROGRESS_STATE_NOT_STARTED)
+                    if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                        exportProgress = holder.progress.coerceIn(0, 100)
+                    }
+                    delay(250L)
+                }
+            }
         } catch (error: Exception) {
             exporting = false
+            exportProgress = 0
             transformer = null
             message = "Couldn't start export: " + (error.message ?: "check selected media")
             output.delete()
