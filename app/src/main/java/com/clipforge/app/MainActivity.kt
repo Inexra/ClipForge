@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -86,15 +87,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.Brightness
+import androidx.media3.effect.HslAdjustment
+import androidx.media3.effect.RgbFilter
+import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.StaticOverlaySettings
@@ -135,10 +143,24 @@ private data class Clip(
     val name: String,
     val sourceMs: Long,
     val startMs: Long = 0L,
-    val endMs: Long = sourceMs
+    val endMs: Long = sourceMs,
+    val speed: Float = 1f,
+    val zoomStart: Float = 1f,
+    val zoomEnd: Float = 1f,
+    val rotationStart: Float = 0f,
+    val rotationEnd: Float = 0f,
+    val transition: String = "Cut"
 ) {
     val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
 }
+
+private data class CaptionLine(
+    val id: String = UUID.randomUUID().toString(),
+    val clipId: String,
+    val startMs: Long,
+    val endMs: Long,
+    val text: String
+)
 
 private data class Project(
     val clips: List<Clip>,
@@ -146,7 +168,10 @@ private data class Project(
     val titleText: String,
     val brightness: Float,
     val muteVideoAudio: Boolean,
-    val format: String
+    val format: String,
+    val captions: List<CaptionLine>,
+    val saturation: Float,
+    val filterPreset: String
 )
 
 class MainActivity : ComponentActivity() {
@@ -176,6 +201,10 @@ private fun ClipForgeApp() {
     var musicName by remember { mutableStateOf<String?>(null) }
     var titleText by remember { mutableStateOf("") }
     var brightness by remember { mutableStateOf(0f) }
+    var saturation by remember { mutableStateOf(0f) }
+    var filterPreset by remember { mutableStateOf("None") }
+    var captions by remember { mutableStateOf<List<CaptionLine>>(emptyList()) }
+    var captioning by remember { mutableStateOf(false) }
     var muteVideoAudio by remember { mutableStateOf(false) }
     var format by remember { mutableStateOf("Original") }
     var tab by remember { mutableStateOf(0) }
@@ -206,14 +235,17 @@ private fun ClipForgeApp() {
         musicName = saved.music?.let { withContext(Dispatchers.IO) { nameForUri(context, it) } }
         titleText = saved.titleText
         brightness = saved.brightness
+        saturation = saved.saturation
+        filterPreset = saved.filterPreset
+        captions = saved.captions
         muteVideoAudio = saved.muteVideoAudio
         format = saved.format
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, muteVideoAudio, format) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, muteVideoAudio, format) {
         if (loaded) withContext(Dispatchers.IO) {
-            saveProject(context, Project(clips, music, titleText, brightness, muteVideoAudio, format))
+            saveProject(context, Project(clips, music, titleText, brightness, muteVideoAudio, format, captions, saturation, filterPreset))
         }
     }
 
@@ -242,6 +274,10 @@ private fun ClipForgeApp() {
             position = player.currentPosition.coerceAtLeast(0L)
             delay(200L)
         }
+    }
+
+    LaunchedEffect(selected?.speed) {
+        player.setPlaybackParameters(PlaybackParameters(selected?.speed ?: 1f))
     }
 
     LaunchedEffect(music) {
@@ -294,8 +330,75 @@ private fun ClipForgeApp() {
         }
     }
 
+    val srtImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val text = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                            ?: throw IllegalStateException("Could not read the subtitle file.")
+                    }
+                    val parsed = parseSrtText(text, clips)
+                    captions = parsed
+                    message = if (parsed.isEmpty()) "No valid SRT subtitles were found." else "Imported " + parsed.size + " subtitle lines."
+                } catch (error: Exception) {
+                    message = "SRT import failed: " + (error.message ?: "invalid file")
+                }
+            }
+        }
+    }
+
+    val srtExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/x-subrip")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val text = writeSrt(captions, clips)
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(text) }
+                            ?: throw IllegalStateException("Could not write the subtitle file.")
+                    }
+                    message = "Subtitles exported as an SRT file."
+                } catch (error: Exception) {
+                    message = "SRT export failed: " + (error.message ?: "unknown error")
+                }
+            }
+        }
+    }
+
     fun importVideos() { videoPicker.launch(arrayOf("video/*")) }
     fun importMusic() { musicPicker.launch(arrayOf("audio/*")) }
+
+    fun generateAutoCaptions() {
+        if (captioning || clips.isEmpty()) {
+            if (clips.isEmpty()) message = "Import a video before generating captions."
+            return
+        }
+        captioning = true
+        scope.launch {
+            try {
+                val generated = withContext(Dispatchers.IO) {
+                    val sources = clips.map { CaptionSource(it.id, it.uri, it.startMs, it.endMs) }
+                    val wordMap = AutoCaptionEngine.transcribeAll(context, sources) { status ->
+                        scope.launch { message = status }
+                    }
+                    clips.flatMap { clip ->
+                        makeCaptionLines(clip.id, wordMap[clip.id].orEmpty(), clip.durationMs)
+                    }
+                }
+                if (generated.isEmpty()) {
+                    message = "No clear English speech was detected. You can still add/edit subtitles manually or import an SRT."
+                } else {
+                    val currentClipIds = clips.map { it.id }.toSet()
+                    captions = captions.filterNot { it.clipId in currentClipIds } + generated
+                    message = "Generated " + generated.size + " caption lines on-device. Review names and timing before export."
+                }
+            } catch (error: Exception) {
+                message = "Auto captions failed: " + (error.message ?: "speech recognition unavailable")
+            } finally {
+                captioning = false
+            }
+        }
+    }
 
     fun updateClip(clip: Clip) { clips = clips.map { if (it.id == clip.id) clip else it } }
 
@@ -349,33 +452,7 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = clips.map { clip ->
-                val clipping = MediaItem.ClippingConfiguration.Builder()
-                    .setStartPositionMs(clip.startMs)
-                    .setEndPositionMs(clip.endMs)
-                    .build()
-                val mediaItem = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
-                val videoEffects = mutableListOf<androidx.media3.common.Effect>()
-                if (brightness != 0f) videoEffects.add(Brightness(brightness))
-                if (titleText.isNotBlank()) {
-                    val styled = SpannableString(titleText.trim()).apply {
-                        setSpan(ForegroundColorSpan(AndroidColor.WHITE), 0, length, 0)
-                        setSpan(StyleSpan(Typeface.BOLD), 0, length, 0)
-                        setSpan(BackgroundColorSpan(AndroidColor.argb(190, 0, 0, 0)), 0, length, 0)
-                    }
-                    val overlaySettings = StaticOverlaySettings.Builder()
-                        .setBackgroundFrameAnchor(0f, -0.78f)
-                        .setOverlayFrameAnchor(0f, 0f)
-                        .build()
-                    videoEffects.add(OverlayEffect(listOf(TextOverlay.createStaticTextOverlay(styled, overlaySettings))))
-                }
-                when (format) {
-                    "9:16 Shorts" -> videoEffects.add(Presentation.createForWidthAndHeight(720, 1280, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
-                    "16:9 Video" -> videoEffects.add(Presentation.createForWidthAndHeight(1280, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
-                    "1:1 Square" -> videoEffects.add(Presentation.createForWidthAndHeight(720, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
-                }
-                EditedMediaItem.Builder(mediaItem).setEffects(Effects(emptyList(), videoEffects)).build()
-            }
+            val editItems = buildEditedItems(context, clips, captions, titleText, brightness, saturation, filterPreset, format)
 
             val mainSequence = if (muteVideoAudio) {
                 EditedMediaItemSequence.withVideoFrom(editItems)
@@ -447,7 +524,7 @@ private fun ClipForgeApp() {
             AppHeader(clips.size)
             when (tab) {
                 0 -> EditorPanel(
-                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, message,
+                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, message,
                     onImport = ::importVideos,
                     onSelect = { selectedId = it },
                     onSeek = { positionMs -> player.seekTo(positionMs); position = positionMs },
@@ -474,11 +551,21 @@ private fun ClipForgeApp() {
                     },
                     onMute = { muteVideoAudio = it }
                 )
-                2 -> LooksPanel(
-                    titleText, brightness,
+                2 -> MotionPanel(
+                    selected, titleText, brightness, saturation, filterPreset, message,
+                    onClipChange = ::updateClip,
                     onTitle = { titleText = it },
                     onBrightness = { brightness = it },
-                    onReset = { brightness = 0f }
+                    onSaturation = { saturation = it },
+                    onFilter = { filterPreset = it }
+                )
+                3 -> CaptionsPanel(
+                    captions, clips, captioning, message,
+                    onAutoCaption = ::generateAutoCaptions,
+                    onImportSrt = { srtImportLauncher.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) },
+                    onExportSrt = { srtExportLauncher.launch("ClipForge-subtitles.srt") },
+                    onEdit = { id, text -> captions = captions.map { if (it.id == id) it.copy(text = text) else it } },
+                    onDelete = { id -> captions = captions.filterNot { it.id == id } }
                 )
                 else -> ExportPanel(
                     clips, musicName, titleText, brightness, format, exporting, outputUri != null, message,
@@ -488,7 +575,7 @@ private fun ClipForgeApp() {
                     onShare = ::shareVideo
                 )
             }
-            Spacer(Modifier.height(8.dp))
+                        Spacer(Modifier.height(8.dp))
         }
         NavigationBar(tab) { tab = it }
     }
@@ -513,11 +600,19 @@ private fun AppHeader(count: Int) {
 @Composable
 private fun EditorPanel(
     clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, player: ExoPlayer,
-    position: Long, trimStart: Long, trimEnd: Long, titleText: String, message: String?,
+    position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>, message: String?,
     onImport: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
 ) {
+    val keyframeFraction = if (selected == null || selected.durationMs <= 0L) 0f else
+        (position.toFloat() / selected.durationMs.toFloat()).coerceIn(0f, 1f)
+    val previewZoom = selected?.let { it.zoomStart + (it.zoomEnd - it.zoomStart) * keyframeFraction } ?: 1f
+    val previewRotation = selected?.let { it.rotationStart + (it.rotationEnd - it.rotationStart) * keyframeFraction } ?: 0f
+    val activeCaption = selected?.let { clip ->
+        captions.firstOrNull { it.clipId == clip.id && position >= it.startMs && position < it.endMs }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Your timeline", fontSize = 27.sp, fontWeight = FontWeight.Bold)
@@ -550,7 +645,11 @@ private fun EditorPanel(
                 Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Box(Modifier.fillMaxWidth().aspectRatio(1.28f).clip(RoundedCornerShape(15.dp)).background(Color.Black)) {
                         AndroidView(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().graphicsLayer(
+                                scaleX = previewZoom,
+                                scaleY = previewZoom,
+                                rotationZ = previewRotation
+                            ),
                             factory = { ctx ->
                                 PlayerView(ctx).apply {
                                     useController = false
@@ -562,10 +661,17 @@ private fun EditorPanel(
                             update = { if (it.player !== player) it.player = player }
                         )
                         if (titleText.isNotBlank()) {
-                            Text(titleText, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp,
-                                maxLines = 3, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 15.dp)
+                            Text(titleText, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
                                     .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.75f))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp))
+                        }
+                        if (activeCaption != null && activeCaption.text.isNotBlank()) {
+                            Text(activeCaption.text, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp,
+                                maxLines = 3, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 12.dp, vertical = 14.dp)
+                                    .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.80f))
                                     .padding(horizontal = 10.dp, vertical = 6.dp))
                         }
                     }
@@ -706,48 +812,269 @@ private fun AudioPanel(
 }
 
 @Composable
-private fun LooksPanel(
-    titleText: String, brightness: Float, onTitle: (String) -> Unit,
-    onBrightness: (Float) -> Unit, onReset: () -> Unit
+private fun MotionPanel(
+    selected: Clip?,
+    titleText: String,
+    brightness: Float,
+    saturation: Float,
+    filterPreset: String,
+    message: String?,
+    onClipChange: (Clip) -> Unit,
+    onTitle: (String) -> Unit,
+    onBrightness: (Float) -> Unit,
+    onSaturation: (Float) -> Unit,
+    onFilter: (String) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
-        Text("Text & picture", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-        Text("Add a title overlay and adjust brightness in your exported video.", color = Muted, fontSize = 13.sp)
+        Text("Motion & effects", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        Text("Per-clip speed, interpolated start/end keyframes, transitions and colour controls.", color = Muted, fontSize = 13.sp)
+
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Edit, null, tint = Lime)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Text overlay", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("MOTION KEYFRAMES", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+                if (selected == null) {
+                    Text("Import and select a clip to edit its keyframes.", color = Muted, fontSize = 13.sp)
+                } else {
+                    Text(selected.name, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Playback speed", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2fx", selected.speed), color = Lime, fontWeight = FontWeight.Bold)
+                    }
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
+                            val active = selected.speed == speed
+                            Surface(
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onClipChange(selected.copy(speed = speed)) },
+                                color = if (active) Lime else PanelAlt,
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text(
+                                    String.format(Locale.US, "%.2fx", speed),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                    color = if (active) Bg else Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = PanelAlt)
+                    Text("START KEYFRAME  •  FRAME 0", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Zoom", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2fx", selected.zoomStart), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.zoomStart,
+                        onValueChange = { onClipChange(selected.copy(zoomStart = it)) },
+                        valueRange = 1f..1.8f
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Rotation", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(selected.rotationStart.toInt().toString() + "°", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.rotationStart,
+                        onValueChange = { onClipChange(selected.copy(rotationStart = it)) },
+                        valueRange = -180f..180f
+                    )
+
+                    HorizontalDivider(color = PanelAlt)
+                    Text("END KEYFRAME  •  LAST FRAME", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Zoom", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2fx", selected.zoomEnd), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.zoomEnd,
+                        onValueChange = { onClipChange(selected.copy(zoomEnd = it)) },
+                        valueRange = 1f..1.8f
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Rotation", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(selected.rotationEnd.toInt().toString() + "°", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.rotationEnd,
+                        onValueChange = { onClipChange(selected.copy(rotationEnd = it)) },
+                        valueRange = -180f..180f
+                    )
+                    Text("ClipForge interpolates zoom and rotation from the start keyframe to the end keyframe when exporting.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
-                OutlinedTextField(
-                    value = titleText, onValueChange = onTitle, modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Title / caption") }, placeholder = { Text("Type your video text…") },
-                    supportingText = { Text("Burned into the final video, not just a preview.") },
-                    minLines = 2, maxLines = 4, shape = RoundedCornerShape(14.dp)
-                )
             }
         }
+
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Tune, null, tint = Lime)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Brightness", fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.weight(1f))
-                    Text((brightness * 100).toInt().toString() + "%", color = Lime, fontWeight = FontWeight.Bold)
+                Text("TRANSITION TO NEXT CLIP", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                if (selected == null) {
+                    Text("Select a clip first.", color = Muted, fontSize = 12.sp)
+                } else {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf("Cut", "Fade", "Flash", "Zoom").forEach { effect ->
+                            val active = selected.transition == effect
+                            Surface(
+                                modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onClipChange(selected.copy(transition = effect)) },
+                                color = if (active) Lime else PanelAlt,
+                                shape = RoundedCornerShape(11.dp)
+                            ) {
+                                Text(effect, modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
+                                    color = if (active) Bg else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    Text("Fade and flash use short edge effects; Zoom adds a push-in. Media3 currently doesn't support overlapping crossfade tracks, so these presets are rendered as cut-safe transitions.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
-                Slider(value = brightness, onValueChange = onBrightness, valueRange = -0.35f..0.35f)
-                Row {
-                    Text("Darker", color = Muted, fontSize = 11.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text("Original", color = Muted, fontSize = 11.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text("Brighter", color = Muted, fontSize = 11.sp)
-                }
-                OutlinedButton(onClick = onReset, shape = RoundedCornerShape(12.dp)) { Text("Reset brightness") }
             }
         }
+
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("TITLE OVERLAY", fontSize = 10.sp, color = Muted, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                OutlinedTextField(
+                    value = titleText, onValueChange = onTitle, modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Title / watermark") }, placeholder = { Text("Type text for the top of the video…") },
+                    minLines = 2, maxLines = 4, shape = RoundedCornerShape(14.dp)
+                )
+                Text("Colour grade", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf("None", "Warm", "Cinematic", "Mono", "Invert").forEach { preset ->
+                        val active = filterPreset == preset
+                        Surface(
+                            modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onFilter(preset) },
+                            color = if (active) Lime else PanelAlt,
+                            shape = RoundedCornerShape(11.dp)
+                        ) {
+                            Text(preset, modifier = Modifier.padding(horizontal = 11.dp, vertical = 9.dp),
+                                color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Brightness", color = Muted, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text((brightness * 100).toInt().toString() + "%", color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                Slider(value = brightness, onValueChange = onBrightness, valueRange = -0.35f..0.35f)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Saturation", color = Muted, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text((saturation + 100f).toInt().toString() + "%", color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                Slider(value = saturation, onValueChange = onSaturation, valueRange = -100f..100f)
+                if (message != null) MessageStrip(message)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaptionsPanel(
+    captions: List<CaptionLine>,
+    clips: List<Clip>,
+    captioning: Boolean,
+    message: String?,
+    onAutoCaption: () -> Unit,
+    onImportSrt: () -> Unit,
+    onExportSrt: () -> Unit,
+    onEdit: (String, String) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
+        Text("Captions studio", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        Text("Generate timestamped English subtitles offline, edit the lines, or import/export SRT.", color = Muted, fontSize = 13.sp)
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AutoAwesome, null, tint = Lime, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("On-device auto captions", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("English speech model · stored on this phone after first download", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    }
+                }
+                Button(
+                    onClick = onAutoCaption,
+                    enabled = clips.isNotEmpty() && !captioning,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(15.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Bg)
+                ) {
+                    if (captioning) {
+                        LinearProgressIndicator(modifier = Modifier.width(28.dp), color = Bg)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Generating captions…", fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(Icons.Default.AutoAwesome, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Generate captions for all clips", fontWeight = FontWeight.Bold)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onImportSrt, modifier = Modifier.weight(1f), shape = RoundedCornerShape(13.dp)) {
+                        Icon(Icons.Default.Add, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Import SRT")
+                    }
+                    OutlinedButton(onClick = onExportSrt, enabled = captions.isNotEmpty(), modifier = Modifier.weight(1f), shape = RoundedCornerShape(13.dp)) {
+                        Icon(Icons.Default.Download, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Export SRT")
+                    }
+                }
+                Text("The first caption run downloads a small English speech model (around 40 MB). Speech is decoded and transcribed locally; no video is uploaded to a caption server.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+        }
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("SUBTITLE LINES", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
+            Spacer(Modifier.weight(1f))
+            Text(captions.size.toString() + " lines", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        if (captions.isEmpty()) {
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+                Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("No subtitle lines yet", fontWeight = FontWeight.Bold)
+                    Text("Tap Generate captions or import an .srt file. You can edit each line before export.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                }
+            }
+        } else {
+            captions.forEachIndexed { index, line ->
+                val clipName = clips.firstOrNull { it.id == line.clipId }?.name ?: "Removed clip"
+                Card(shape = RoundedCornerShape(17.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text((index + 1).toString().padStart(2, '0'), color = Lime, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(time(line.startMs) + " – " + time(line.endMs), color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Delete caption",
+                                tint = Color(0xFFFF8D8D),
+                                modifier = Modifier.size(19.dp).clickable { onDelete(line.id) }
+                            )
+                        }
+                        OutlinedTextField(
+                            value = line.text,
+                            onValueChange = { onEdit(line.id, it) },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text(clipName) },
+                            minLines = 1,
+                            maxLines = 3,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+                }
+            }
+        }
+        if (message != null) MessageStrip(message)
     }
 }
 
@@ -829,14 +1156,16 @@ private fun Summary(label: String, value: String) {
 @Composable
 private fun NavigationBar(tab: Int, select: (Int) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp).clip(RoundedCornerShape(19.dp))
-            .background(Panel).padding(vertical = 7.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+        Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp).clip(RoundedCornerShape(19.dp))
+            .background(Panel).padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         NavItem("Edit", Icons.Default.Movie, tab == 0) { select(0) }
         NavItem("Audio", Icons.Default.LibraryMusic, tab == 1) { select(1) }
-        NavItem("Looks", Icons.Default.AutoAwesome, tab == 2) { select(2) }
-        NavItem("Export", Icons.Default.Download, tab == 3) { select(3) }
+        NavItem("Motion", Icons.Default.Tune, tab == 2) { select(2) }
+        NavItem("Captions", Icons.Default.Subtitles, tab == 3) { select(3) }
+        NavItem("Export", Icons.Default.Download, tab == 4) { select(4) }
     }
 }
 
@@ -891,6 +1220,245 @@ private fun nameForUri(context: Context, uri: Uri): String {
     return name?.takeIf { it.isNotBlank() } ?: (uri.lastPathSegment ?: "Media file")
 }
 
+private fun makeCaptionLines(clipId: String, words: List<WordTiming>, durationMs: Long): List<CaptionLine> {
+    val ordered = words.sortedBy { it.startMs }
+    val output = mutableListOf<CaptionLine>()
+    val group = mutableListOf<WordTiming>()
+    fun flush() {
+        if (group.isEmpty()) return
+        val start = group.first().startMs.coerceIn(0L, durationMs.coerceAtLeast(1L) - 1L)
+        val end = group.last().endMs.coerceIn(start + 1L, durationMs.coerceAtLeast(start + 1L))
+        val text = group.joinToString(" ") { it.text }.trim()
+        if (text.isNotBlank()) output.add(CaptionLine(clipId = clipId, startMs = start, endMs = end, text = text))
+        group.clear()
+    }
+    ordered.forEach { word ->
+        val punctuationEnd = group.lastOrNull()?.text?.endsWith(".") == true ||
+            group.lastOrNull()?.text?.endsWith("?") == true ||
+            group.lastOrNull()?.text?.endsWith("!") == true
+        if (group.isNotEmpty() && (group.size >= 6 || word.endMs - group.first().startMs >= 2_600L || punctuationEnd)) flush()
+        group.add(word)
+        if (word.text.endsWith(".") || word.text.endsWith("?") || word.text.endsWith("!")) flush()
+    }
+    flush()
+    return output
+}
+
+private fun buildEditedItems(
+    context: Context,
+    clips: List<Clip>,
+    captions: List<CaptionLine>,
+    titleText: String,
+    brightness: Float,
+    saturation: Float,
+    filterPreset: String,
+    format: String
+): List<EditedMediaItem> {
+    val result = mutableListOf<EditedMediaItem>()
+    clips.forEachIndexed { clipIndex, clip ->
+        val duration = clip.durationMs.coerceAtLeast(1L)
+        val activeCaptions = captions.filter { it.clipId == clip.id && it.endMs > 0L && it.startMs < duration }
+        val transitionIn = clips.getOrNull(clipIndex - 1)?.transition ?: "Cut"
+        val transitionOut = if (clipIndex < clips.lastIndex) clip.transition else "Cut"
+        val transitionLength = minOf(400L, (duration / 3L).coerceAtLeast(0L))
+        val boundaries = sortedSetOf(0L, duration)
+
+        // These points create visible intermediate keyframes during export, rather than a UI-only animation.
+        for (step in 1..12) boundaries.add(duration * step / 13L)
+        activeCaptions.forEach { caption ->
+            boundaries.add(caption.startMs.coerceIn(0L, duration))
+            boundaries.add(caption.endMs.coerceIn(0L, duration))
+        }
+        if (transitionLength > 0L) {
+            for (step in 1..5) {
+                val inPoint = transitionLength * step / 5L
+                val outPoint = duration - transitionLength + transitionLength * step / 5L
+                if (transitionIn != "Cut") boundaries.add(inPoint.coerceIn(0L, duration))
+                if (transitionOut != "Cut") boundaries.add(outPoint.coerceIn(0L, duration))
+            }
+        }
+        val points = boundaries.toList()
+        val speedProvider = object : SpeedProvider {
+            override fun getSpeed(timeUs: Long): Float = clip.speed
+            override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
+        }
+
+        for (pointIndex in 0 until points.lastIndex) {
+            val relativeStart = points[pointIndex]
+            val relativeEnd = points[pointIndex + 1]
+            if (relativeEnd <= relativeStart) continue
+            val mid = (relativeStart + relativeEnd) / 2f
+            val fraction = (mid / duration.toFloat()).coerceIn(0f, 1f)
+            val keyZoom = clip.zoomStart + (clip.zoomEnd - clip.zoomStart) * fraction
+            val keyRotation = clip.rotationStart + (clip.rotationEnd - clip.rotationStart) * fraction
+            val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
+                (1f - mid / transitionLength.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            val outRatio = if (transitionLength > 0L && transitionOut != "Cut" && mid > duration - transitionLength) {
+                (1f - (duration - mid) / transitionLength.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+
+            var transitionBrightness = 0f
+            var transitionScale = 1f
+            fun applyTransition(name: String, ratio: Float) {
+                when (name) {
+                    "Fade" -> transitionBrightness += -0.95f * ratio
+                    "Flash" -> transitionBrightness += 0.85f * ratio
+                    "Zoom" -> transitionScale *= 1f + 0.16f * ratio
+                }
+            }
+            applyTransition(transitionIn, inRatio)
+            applyTransition(transitionOut, outRatio)
+
+            val effects = mutableListOf<androidx.media3.common.Effect>()
+            val adjustedBrightness = (brightness + transitionBrightness).coerceIn(-1f, 1f)
+            if (adjustedBrightness != 0f) effects.add(Brightness(adjustedBrightness))
+            val scale = (keyZoom * transitionScale).coerceIn(0.75f, 2.2f)
+            if (scale != 1f || keyRotation != 0f) {
+                effects.add(ScaleAndRotateTransformation.Builder().setScale(scale, scale).setRotationDegrees(keyRotation).build())
+            }
+            if (saturation != 0f || filterPreset == "Warm" || filterPreset == "Cinematic") {
+                val saturationAdjustment = (saturation + if (filterPreset == "Warm") 12f else if (filterPreset == "Cinematic") -8f else 0f).coerceIn(-100f, 100f)
+                val hue = if (filterPreset == "Warm") 12f else if (filterPreset == "Cinematic") -4f else 0f
+                val lightness = if (filterPreset == "Warm") 2f else if (filterPreset == "Cinematic") -3f else 0f
+                effects.add(HslAdjustment.Builder()
+                    .adjustHue(hue)
+                    .adjustLightness(lightness)
+                    .adjustSaturation(saturationAdjustment)
+                    .build())
+            }
+            when (filterPreset) {
+                "Mono" -> effects.add(RgbFilter.createGrayscaleFilter())
+                "Invert" -> effects.add(RgbFilter.createInvertedFilter())
+            }
+
+            val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
+            if (titleText.isNotBlank()) {
+                val styledTitle = SpannableString(titleText.trim()).apply {
+                    setSpan(ForegroundColorSpan(AndroidColor.WHITE), 0, length, 0)
+                    setSpan(StyleSpan(Typeface.BOLD), 0, length, 0)
+                    setSpan(BackgroundColorSpan(AndroidColor.argb(190, 0, 0, 0)), 0, length, 0)
+                }
+                val titleSettings = StaticOverlaySettings.Builder()
+                    .setBackgroundFrameAnchor(0f, 0.78f)
+                    .setOverlayFrameAnchor(0f, 0f)
+                    .build()
+                overlays.add(TextOverlay.createStaticTextOverlay(styledTitle, titleSettings))
+            }
+            val activeCaption = activeCaptions.firstOrNull { mid >= it.startMs && mid < it.endMs }
+            if (activeCaption != null && activeCaption.text.isNotBlank()) {
+                val styledCaption = SpannableString(activeCaption.text.trim()).apply {
+                    setSpan(ForegroundColorSpan(AndroidColor.WHITE), 0, length, 0)
+                    setSpan(StyleSpan(Typeface.BOLD), 0, length, 0)
+                    setSpan(BackgroundColorSpan(AndroidColor.argb(210, 0, 0, 0)), 0, length, 0)
+                }
+                val captionSettings = StaticOverlaySettings.Builder()
+                    .setBackgroundFrameAnchor(0f, -0.78f)
+                    .setOverlayFrameAnchor(0f, 0f)
+                    .build()
+                overlays.add(TextOverlay.createStaticTextOverlay(styledCaption, captionSettings))
+            }
+            if (overlays.isNotEmpty()) effects.add(OverlayEffect(overlays))
+
+            when (format) {
+                "9:16 Shorts" -> effects.add(Presentation.createForWidthAndHeight(720, 1280, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "16:9 Video" -> effects.add(Presentation.createForWidthAndHeight(1280, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "1:1 Square" -> effects.add(Presentation.createForWidthAndHeight(720, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+            }
+
+            val clipping = MediaItem.ClippingConfiguration.Builder()
+                .setStartPositionMs(clip.startMs + relativeStart)
+                .setEndPositionMs(clip.startMs + relativeEnd)
+                .build()
+            val mediaItem = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
+            result.add(
+                EditedMediaItem.Builder(mediaItem)
+                    .setEffects(Effects(emptyList(), effects))
+                    .setSpeed(speedProvider)
+                    .build()
+            )
+        }
+    }
+    return result
+}
+
+private fun toSrtTimestamp(milliseconds: Long): String {
+    val total = milliseconds.coerceAtLeast(0L)
+    val hours = total / 3_600_000L
+    val minutes = (total % 3_600_000L) / 60_000L
+    val seconds = (total % 60_000L) / 1_000L
+    val millis = total % 1_000L
+    return String.format(Locale.US, "%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
+}
+
+private fun parseSrtTimestamp(value: String): Long? {
+    val match = Regex("""(\d{2}):(\d{2}):(\d{2})[,.](\d{1,3})""").find(value.trim()) ?: return null
+    val hours = match.groupValues[1].toLongOrNull() ?: return null
+    val minutes = match.groupValues[2].toLongOrNull() ?: return null
+    val seconds = match.groupValues[3].toLongOrNull() ?: return null
+    val millis = match.groupValues[4].padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+    return hours * 3_600_000L + minutes * 60_000L + seconds * 1_000L + millis
+}
+
+private fun writeSrt(captions: List<CaptionLine>, clips: List<Clip>): String {
+    val offsets = mutableMapOf<String, Long>()
+    var running = 0L
+    clips.forEach { clip ->
+        offsets[clip.id] = running
+        running += (clip.durationMs / clip.speed).toLong()
+    }
+    val lines = captions.mapNotNull { caption ->
+        val clip = clips.firstOrNull { it.id == caption.clipId } ?: return@mapNotNull null
+        val offset = offsets[clip.id] ?: 0L
+        Triple(
+            offset + (caption.startMs / clip.speed).toLong(),
+            offset + (caption.endMs / clip.speed).toLong(),
+            caption.text.trim()
+        )
+    }.filter { it.second > it.first && it.third.isNotBlank() }.sortedBy { it.first }
+    return lines.mapIndexed { index, caption ->
+        (index + 1).toString() + "\n" +
+            toSrtTimestamp(caption.first) + " --> " + toSrtTimestamp(caption.second) + "\n" +
+            caption.third
+    }.joinToString("\n\n") + if (lines.isEmpty()) "" else "\n"
+}
+
+private fun parseSrtText(text: String, clips: List<Clip>): List<CaptionLine> {
+    if (clips.isEmpty()) return emptyList()
+    val blocks = text.trim().split(Regex("""\r?\n\s*\r?\n"""))
+    val output = mutableListOf<CaptionLine>()
+    for (block in blocks) {
+        val lines = block.lines()
+        val timeIndex = lines.indexOfFirst { it.contains("-->") }
+        if (timeIndex < 0) continue
+        val parts = lines[timeIndex].split("-->")
+        if (parts.size != 2) continue
+        val start = parseSrtTimestamp(parts[0]) ?: continue
+        val end = parseSrtTimestamp(parts[1]) ?: continue
+        if (end <= start) continue
+        val captionText = lines.drop(timeIndex + 1).joinToString(" ").trim()
+        if (captionText.isBlank()) continue
+        var clipOffset = 0L
+        clips.forEach { clip ->
+            val clipDurationTimeline = (clip.durationMs / clip.speed).toLong()
+            val overlapStart = maxOf(start, clipOffset)
+            val overlapEnd = minOf(end, clipOffset + clipDurationTimeline)
+            if (overlapEnd > overlapStart && clipDurationTimeline > 0L) {
+                val localStart = ((overlapStart - clipOffset) * clip.speed).toLong().coerceAtLeast(0L)
+                val localEnd = ((overlapEnd - clipOffset) * clip.speed).toLong().coerceIn(localStart + 1L, clip.durationMs)
+                output.add(CaptionLine(
+                    clipId = clip.id,
+                    startMs = localStart,
+                    endMs = localEnd,
+                    text = captionText
+                ))
+            }
+            clipOffset += clipDurationTimeline
+        }
+    }
+    return output
+}
+
 private fun loadProject(context: Context): Project {
     val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     val clips = mutableListOf<Clip>()
@@ -908,18 +1476,46 @@ private fun loadProject(context: Context): Project {
                     name = o.optString("name", "Video clip"),
                     sourceMs = source,
                     startMs = start,
-                    endMs = end
+                    endMs = end,
+                    speed = o.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 3f),
+                    zoomStart = o.optDouble("zoomStart", 1.0).toFloat().coerceIn(1f, 1.8f),
+                    zoomEnd = o.optDouble("zoomEnd", 1.0).toFloat().coerceIn(1f, 1.8f),
+                    rotationStart = o.optDouble("rotationStart", 0.0).toFloat().coerceIn(-180f, 180f),
+                    rotationEnd = o.optDouble("rotationEnd", 0.0).toFloat().coerceIn(-180f, 180f),
+                    transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut"
+                ))
+            }
+        }
+    }
+    val captionList = mutableListOf<CaptionLine>()
+    runCatching {
+        val array = JSONArray(p.getString("captions", "[]") ?: "[]")
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            val start = item.optLong("start", 0L)
+            val end = item.optLong("end", 0L)
+            val text = item.optString("text", "")
+            if (end > start && text.isNotBlank() && clips.any { it.id == item.optString("clipId") }) {
+                captionList.add(CaptionLine(
+                    id = item.optString("id", UUID.randomUUID().toString()),
+                    clipId = item.optString("clipId"),
+                    startMs = start,
+                    endMs = end,
+                    text = text
                 ))
             }
         }
     }
     return Project(
-        clips,
-        p.getString("music", null)?.let { Uri.parse(it) },
-        p.getString("title", "") ?: "",
-        p.getFloat("brightness", 0f).coerceIn(-0.35f, 0.35f),
-        p.getBoolean("mute", false),
-        p.getString("format", "Original") ?: "Original"
+        clips = clips,
+        music = p.getString("music", null)?.let { Uri.parse(it) },
+        titleText = p.getString("title", "") ?: "",
+        brightness = p.getFloat("brightness", 0f).coerceIn(-0.35f, 0.35f),
+        muteVideoAudio = p.getBoolean("mute", false),
+        format = p.getString("format", "Original") ?: "Original",
+        captions = captionList,
+        saturation = p.getFloat("saturation", 0f).coerceIn(-100f, 100f),
+        filterPreset = p.getString("filterPreset", "None") ?: "None"
     )
 }
 
@@ -933,13 +1529,32 @@ private fun saveProject(context: Context, project: Project) {
             put("source", clip.sourceMs)
             put("start", clip.startMs)
             put("end", clip.endMs)
+            put("speed", clip.speed)
+            put("zoomStart", clip.zoomStart)
+            put("zoomEnd", clip.zoomEnd)
+            put("rotationStart", clip.rotationStart)
+            put("rotationEnd", clip.rotationEnd)
+            put("transition", clip.transition)
+        })
+    }
+    val subtitleArray = JSONArray()
+    project.captions.forEach { caption ->
+        subtitleArray.put(JSONObject().apply {
+            put("id", caption.id)
+            put("clipId", caption.clipId)
+            put("start", caption.startMs)
+            put("end", caption.endMs)
+            put("text", caption.text)
         })
     }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
         .putString("clips", array.toString())
+        .putString("captions", subtitleArray.toString())
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
+        .putFloat("saturation", project.saturation)
+        .putString("filterPreset", project.filterPreset)
         .putBoolean("mute", project.muteVideoAudio)
         .putString("format", project.format)
         .apply()
