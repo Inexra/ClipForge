@@ -9,13 +9,14 @@ ClipForge is a native Android video editor built with Kotlin, Jetpack Compose, E
 - Undo/redo history for common edits.
 - Portable project bundle export/import ZIPs with source media and edit settings.
 - Image/logo/sticker overlay layers with independent in/out timing, position, size, opacity, and rotation.
+- On-device AI person cutout for still-image layers. The bundled segmentation model processes selected images locally; it does not remove backgrounds from moving video.
 - Freeze-frame captures added as timed full-frame layers.
 
 ### Motion and visual effects
-- Per-clip speed presets (0.5×–3×) and speed curves (constant, ramp up/down, ease-in/out, pulse).
+- Per-clip speed presets (0.25×–3×) and speed curves (constant, ramp up/down, ease-in/out, pulse). Slow motion is conventional frame-rate retiming, not optical-flow frame interpolation.
 - Three-point start/middle/end zoom and rotation keyframes with selectable interpolation curves.
 - Crop/reframe zoom with horizontal and vertical positioning.
-- Cut, Fade, Flash, and Zoom transition presets. Fade/flash/zoom are cut-safe edge effects, **not overlapping cross-dissolves**.
+- Cut, true overlapping Crossfade (up to 450 ms during export), Fade, Flash, and Zoom transition presets. Crossfades use separate video tracks during export; the timeline preview still previews the selected clip rather than a live composite.
 - Brightness, saturation, and colour presets (Warm, Cinematic, Mono, Invert).
 - Title overlay and timed subtitle captions with selectable visual styles (Classic, Yellow Pop, Neon, Minimal), placement, and size.
 
@@ -34,7 +35,7 @@ ClipForge is a native Android video editor built with Kotlin, Jetpack Compose, E
 
 ## Captions and privacy
 
-The first automatic-caption run for each language needs an internet connection to download its small speech model (roughly 40–45 MB). Speech recognition then runs locally, and source audio/video is not uploaded to a caption service. The included models are English and Hindi only. Speech-to-text quality varies with accent, noise, source codecs, and audio quality; review all generated subtitles.
+The first automatic-caption run for each language needs an internet connection to download its small speech model (roughly 40–45 MB). Speech recognition then runs locally, and source audio/video is not uploaded to a caption service. The person-cutout model is bundled in the APK and can run offline after installation. The included models are English and Hindi only. Speech-to-text quality varies with accent, noise, source codecs, and audio quality; review all generated subtitles.
 
 Text-to-speech uses the Android speech engine installed on the phone, not a guaranteed cloud voice. Install the appropriate language voice data in Android Text-to-Speech settings when needed.
 
@@ -56,4 +57,4 @@ Every push to `main` triggers a cloud build. No paid backend or provider API key
 
 ## Limitations versus CapCut/VN
 
-ClipForge is a substantially expanded editing MVP, **not yet a complete feature-for-feature CapCut/VN replacement**. The current engine does not yet have true overlapping cross-dissolves; full video-on-video timeline compositing; multi-point Bézier keyframe graphs for every property; optical-flow/frame-interpolated slow motion; reverse-playback export; chroma key or AI subject/background removal; a large animated text/sticker/effect/template library; silence/filler-word removal; AI image/video generation; cloud collaboration/sync; or direct social-platform publishing. Auto beat detection is a signal-energy heuristic, not a guaranteed musical beat grid. Exported 4K output may be downscaled if the phone's hardware encoder doesn't support the requested resolution; 60 FPS is a cap and does not manufacture interpolated frames. Rendering speed and supported formats depend on hardware codecs, temperature, and free storage. A successful cloud build does not replace testing on a physical phone.
+ClipForge is a substantially expanded editing MVP, **not yet a complete feature-for-feature CapCut/VN replacement**. The current engine does not yet have full arbitrary video-on-video timeline compositing; multi-point Bézier keyframe graphs for every property; optical-flow/frame-interpolated slow motion; reverse-playback export; chroma key or AI subject/background removal for moving video (still-image person cutout is supported); a large animated text/sticker/effect/template library; silence/filler-word removal; AI image/video generation; cloud collaboration/sync; or direct social-platform publishing. Auto beat detection is a signal-energy heuristic, not a guaranteed musical beat grid. Exported 4K output may be downscaled if the phone's hardware encoder doesn't support the requested resolution; 60 FPS is a cap and does not manufacture interpolated frames. Rendering speed and supported formats depend on hardware codecs, temperature, and free storage. A successful cloud build does not replace testing on a physical phone.
