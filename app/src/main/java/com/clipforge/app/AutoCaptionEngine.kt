@@ -157,7 +157,7 @@ object AutoCaptionEngine {
                 }
             }
 
-            collectWordTimings(recognizer.finalResult(), words)
+            collectWordTimings(recognizer.getFinalResult(), words)
             return words.sortedBy { it.startMs }
         } finally {
             runCatching { decoder?.stop() }
