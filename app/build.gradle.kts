@@ -12,8 +12,19 @@ android {
         applicationId = "com.clipforge.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
+    }
+
+    // The primary target is the ARM64 Moto G57 Power. Avoid packaging other CPU libraries
+    // in this phone-specific APK; the bundled offline speech models already make it large.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a")
+            isUniversalApk = false
+        }
     }
 
     buildTypes {
@@ -55,7 +66,7 @@ dependencies {
     implementation("androidx.media3:media3-transformer:$media3Version")
     implementation("androidx.media3:media3-effect:$media3Version")
 
-    // Offline English speech-to-text for auto captions; the acoustic model downloads on first use.
+    // Offline English/Hindi speech models are bundled by the CI workflow before APK assembly.
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("com.alphacephei:vosk-android:0.3.75@aar")
     // On-device person segmentation for transparent photo cutouts in the Layers workspace.

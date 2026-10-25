@@ -58,10 +58,19 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
+      - name: Verify phone-specific APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-arm64-v8a-debug.apk"
+          test -s "$APK"
+          ls -lh "$APK"
+          unzip -l "$APK" | grep -E "offline-caption-models/(vosk-model-small-en-us-0.15|vosk-model-small-hi-0.22)\\.zip"
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ClipForge-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ClipForge-arm64-apk
+          path: app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
           if-no-files-found: error
           retention-days: 14
