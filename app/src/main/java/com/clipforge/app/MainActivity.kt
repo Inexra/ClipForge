@@ -220,7 +220,10 @@ private data class Project(
     val musicVolume: Float = 1f,
     val voiceoverVolume: Float = 1f,
     val exportQuality: String = "High",
-    val exportFrameRate: Int = 30
+    val exportFrameRate: Int = 30,
+    val captionStyle: String = "Classic",
+    val captionPosition: String = "Bottom",
+    val captionScale: Float = 1f
 )
 
 class MainActivity : ComponentActivity() {
@@ -253,6 +256,9 @@ private fun ClipForgeApp() {
     var voiceoverVolume by remember { mutableStateOf(1f) }
     var exportQuality by remember { mutableStateOf("High") }
     var exportFrameRate by remember { mutableStateOf(30) }
+    var captionStyle by remember { mutableStateOf("Classic") }
+    var captionPosition by remember { mutableStateOf("Bottom") }
+    var captionScale by remember { mutableStateOf(1f) }
     var titleText by remember { mutableStateOf("") }
     var brightness by remember { mutableStateOf(0f) }
     var saturation by remember { mutableStateOf(0f) }
@@ -305,7 +311,8 @@ private fun ClipForgeApp() {
     fun currentProject() = Project(
         clips, music, titleText, brightness, muteVideoAudio, format,
         captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
-        sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate
+        sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate,
+        captionStyle, captionPosition, captionScale
     )
     fun recordUndo() {
         val snapshot = currentProject()
@@ -335,6 +342,9 @@ private fun ClipForgeApp() {
         format = project.format
         exportQuality = project.exportQuality
         exportFrameRate = project.exportFrameRate
+        captionStyle = project.captionStyle
+        captionPosition = project.captionPosition
+        captionScale = project.captionScale
     }
     fun undoProject() {
         if (undoStack.isEmpty()) return
@@ -360,6 +370,9 @@ private fun ClipForgeApp() {
         voiceoverVolume = saved.voiceoverVolume
         exportQuality = saved.exportQuality
         exportFrameRate = saved.exportFrameRate
+        captionStyle = saved.captionStyle
+        captionPosition = saved.captionPosition
+        captionScale = saved.captionScale
         titleText = saved.titleText
         brightness = saved.brightness
         saturation = saved.saturation
@@ -375,12 +388,13 @@ private fun ClipForgeApp() {
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format, exportQuality, exportFrameRate) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format, exportQuality, exportFrameRate, captionStyle, captionPosition, captionScale) {
         if (loaded) withContext(Dispatchers.IO) {
             saveProject(context, Project(
                 clips, music, titleText, brightness, muteVideoAudio, format,
                 captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
-                sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate
+                sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate,
+                captionStyle, captionPosition, captionScale
             ))
         }
     }
@@ -847,7 +861,7 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume, exportFrameRate)
+            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume, exportFrameRate, captionStyle, captionPosition, captionScale)
 
             val mainSequence = if (muteVideoAudio) {
                 EditedMediaItemSequence.withVideoFrom(editItems)
@@ -941,7 +955,7 @@ private fun ClipForgeApp() {
             AppHeader(clips.size)
             when (tab) {
                 0 -> EditorPanel(
-                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, message,
+                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, captionStyle, captionPosition, captionScale, message,
                     canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
                     onUndo = ::undoProject, onRedo = ::redoProject,
                     onSaveProjectBundle = ::exportProjectBundle,
@@ -1017,6 +1031,12 @@ private fun ClipForgeApp() {
                     captions, clips, captioning, message,
                     captionLanguageId = captionLanguageId,
                     ttsGenerating = ttsGenerating,
+                    captionStyle = captionStyle,
+                    captionPosition = captionPosition,
+                    captionScale = captionScale,
+                    onCaptionStyle = { captionStyle = it },
+                    onCaptionPosition = { captionPosition = it },
+                    onCaptionScale = { captionScale = it },
                     onLanguageChange = { captionLanguageId = it },
                     onAutoCaption = ::generateAutoCaptions,
                     onGenerateNarration = ::generateCaptionNarration,
@@ -1071,7 +1091,7 @@ private fun AppHeader(count: Int) {
 private fun EditorPanel(
     clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, player: ExoPlayer,
     position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
-    photoLayers: List<PhotoLayer>, message: String?,
+    photoLayers: List<PhotoLayer>, captionStyle: String, captionPosition: String, captionScale: Float, message: String?,
     canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
     onSaveProjectBundle: () -> Unit, onOpenProjectBundle: () -> Unit,
     onImport: () -> Unit, onFreeze: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
@@ -1088,6 +1108,16 @@ private fun EditorPanel(
     } ?: 0f
     val activeCaption = selected?.let { clip ->
         captions.firstOrNull { it.clipId == clip.id && position >= it.startMs && position < it.endMs }
+    }
+    val previewCaptionAlignment = when (captionPosition) {
+        "Top" -> Alignment.TopCenter
+        "Center" -> Alignment.Center
+        else -> Alignment.BottomCenter
+    }
+    val previewCaptionPadding = when (captionPosition) {
+        "Top" -> Modifier.padding(top = 42.dp)
+        "Center" -> Modifier
+        else -> Modifier.padding(bottom = 14.dp)
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1175,11 +1205,19 @@ private fun EditorPanel(
                                     .padding(horizontal = 10.dp, vertical = 6.dp))
                         }
                         if (activeCaption != null && activeCaption.text.isNotBlank()) {
-                            Text(activeCaption.text, color = Color.White, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp,
-                                maxLines = 3, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 12.dp, vertical = 14.dp)
-                                    .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.80f))
-                                    .padding(horizontal = 10.dp, vertical = 6.dp))
+                            Text(
+                                activeCaption.text,
+                                color = captionComposeTextColor(captionStyle),
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = (15f * captionScale).sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.align(previewCaptionAlignment).then(previewCaptionPadding)
+                                    .padding(horizontal = 12.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(captionComposeBackground(captionStyle))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
                         }
                         val totalBeforeSelected = clips.take(selectedIndex.coerceAtLeast(0)).sumOf { (it.durationMs / it.speed).toLong() }
                         val globalPreviewPosition = totalBeforeSelected + if (selected != null) (position / selected.speed).toLong() else 0L
@@ -1702,6 +1740,12 @@ private fun CaptionsPanel(
     message: String?,
     captionLanguageId: String,
     ttsGenerating: Boolean,
+    captionStyle: String,
+    captionPosition: String,
+    captionScale: Float,
+    onCaptionStyle: (String) -> Unit,
+    onCaptionPosition: (String) -> Unit,
+    onCaptionScale: (Float) -> Unit,
     onLanguageChange: (String) -> Unit,
     onAutoCaption: () -> Unit,
     onGenerateNarration: () -> Unit,
@@ -1746,6 +1790,39 @@ private fun CaptionsPanel(
                         }
                     }
                 }
+                Text("CAPTION STYLE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf("Classic", "Yellow Pop", "Neon", "Minimal").forEach { style ->
+                        val active = captionStyle == style
+                        Surface(
+                            modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onCaptionStyle(style) },
+                            color = if (active) Lime else PanelAlt, shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(style, modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                Text("Caption placement", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf("Top", "Center", "Bottom").forEach { option ->
+                        val active = captionPosition == option
+                        Surface(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).clickable { onCaptionPosition(option) },
+                            color = if (active) Lime else PanelAlt, shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(option, modifier = Modifier.padding(horizontal = 8.dp, vertical = 9.dp),
+                                color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Caption size", color = Muted, fontSize = 12.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text("${(captionScale * 100).toInt()}%", color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                Slider(value = captionScale, onValueChange = onCaptionScale, valueRange = 0.7f..1.5f)
                 Button(
                     onClick = onAutoCaption,
                     enabled = clips.isNotEmpty() && !captioning,
@@ -1840,6 +1917,45 @@ private fun CaptionsPanel(
         }
         if (message != null) MessageStrip(message)
     }
+}
+
+private fun styledCaptionText(text: String, style: String): SpannableString {
+    return SpannableString(text.trim()).apply {
+        if (length > 0) {
+            val foreground = when (style) {
+                "Yellow Pop" -> AndroidColor.BLACK
+                "Neon" -> AndroidColor.rgb(80, 240, 255)
+                else -> AndroidColor.WHITE
+            }
+            setSpan(ForegroundColorSpan(foreground), 0, length, 0)
+            setSpan(StyleSpan(Typeface.BOLD), 0, length, 0)
+            when (style) {
+                "Yellow Pop" -> setSpan(BackgroundColorSpan(AndroidColor.rgb(255, 221, 65)), 0, length, 0)
+                "Neon" -> setSpan(BackgroundColorSpan(AndroidColor.argb(225, 8, 22, 48)), 0, length, 0)
+                "Classic" -> setSpan(BackgroundColorSpan(AndroidColor.argb(210, 0, 0, 0)), 0, length, 0)
+                "Minimal" -> Unit
+            }
+        }
+    }
+}
+
+private fun captionAnchorY(position: String): Float = when (position) {
+    "Top" -> 0.78f
+    "Center" -> 0f
+    else -> -0.78f
+}
+
+private fun captionComposeTextColor(style: String): Color = when (style) {
+    "Yellow Pop" -> Color.Black
+    "Neon" -> Color(0xFF50F0FF)
+    else -> Color.White
+}
+
+private fun captionComposeBackground(style: String): Color = when (style) {
+    "Yellow Pop" -> Color(0xFFFFDD41)
+    "Neon" -> Color(0xE1081630)
+    "Classic" -> Color.Black.copy(alpha = 0.82f)
+    else -> Color.Transparent
 }
 
 private fun exportBitrates(format: String, quality: String): Pair<Int, Int> {
@@ -2263,7 +2379,10 @@ private fun buildEditedItems(
     filterPreset: String,
     format: String,
     sourceVolume: Float,
-    outputFrameRate: Int
+    outputFrameRate: Int,
+    captionStyle: String,
+    captionPosition: String,
+    captionScale: Float
 ): List<EditedMediaItem> {
     val result = mutableListOf<EditedMediaItem>()
     clips.forEachIndexed { clipIndex, clip ->
@@ -2392,14 +2511,11 @@ private fun buildEditedItems(
             }
             val activeCaption = activeCaptions.firstOrNull { mid >= it.startMs && mid < it.endMs }
             if (activeCaption != null && activeCaption.text.isNotBlank()) {
-                val styledCaption = SpannableString(activeCaption.text.trim()).apply {
-                    setSpan(ForegroundColorSpan(AndroidColor.WHITE), 0, length, 0)
-                    setSpan(StyleSpan(Typeface.BOLD), 0, length, 0)
-                    setSpan(BackgroundColorSpan(AndroidColor.argb(210, 0, 0, 0)), 0, length, 0)
-                }
+                val styledCaption = styledCaptionText(activeCaption.text, captionStyle)
                 val captionSettings = StaticOverlaySettings.Builder()
-                    .setBackgroundFrameAnchor(0f, -0.78f)
+                    .setBackgroundFrameAnchor(0f, captionAnchorY(captionPosition))
                     .setOverlayFrameAnchor(0f, 0f)
+                    .setScale(captionScale.coerceIn(0.7f, 1.5f), captionScale.coerceIn(0.7f, 1.5f))
                     .build()
                 overlays.add(TextOverlay.createStaticTextOverlay(styledCaption, captionSettings))
             }
@@ -2608,7 +2724,10 @@ private fun loadProject(context: Context): Project {
         musicVolume = p.getFloat("musicVolume", 1f).coerceIn(0f, 1f),
         voiceoverVolume = p.getFloat("voiceoverVolume", 1f).coerceIn(0f, 1f),
         exportQuality = p.getString("exportQuality", "High")?.takeIf { it in listOf("Saver", "Standard", "High", "Ultra") } ?: "High",
-        exportFrameRate = p.getInt("exportFrameRate", 30).coerceIn(24, 60).let { if (it in listOf(24, 30, 60)) it else 30 }
+        exportFrameRate = p.getInt("exportFrameRate", 30).coerceIn(24, 60).let { if (it in listOf(24, 30, 60)) it else 30 },
+        captionStyle = p.getString("captionStyle", "Classic")?.takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal") } ?: "Classic",
+        captionPosition = p.getString("captionPosition", "Bottom")?.takeIf { it in listOf("Top", "Center", "Bottom") } ?: "Bottom",
+        captionScale = p.getFloat("captionScale", 1f).coerceIn(0.7f, 1.5f)
     )
 }
 
@@ -2676,6 +2795,9 @@ private fun saveProject(context: Context, project: Project) {
         .putFloat("voiceoverVolume", project.voiceoverVolume)
         .putString("exportQuality", project.exportQuality)
         .putInt("exportFrameRate", project.exportFrameRate)
+        .putString("captionStyle", project.captionStyle)
+        .putString("captionPosition", project.captionPosition)
+        .putFloat("captionScale", project.captionScale)
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
