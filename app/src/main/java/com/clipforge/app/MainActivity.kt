@@ -17,7 +17,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.util.Size
+import androidx.media3.common.util.Size
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
 import android.provider.MediaStore
