@@ -2380,39 +2380,6 @@ private fun TimelineClipCard(clip: Clip, index: Int, selected: Boolean, onClick:
 }
 
 @Composable
-private fun TimelineThumbnail(clip: Clip) {
-    val context = LocalContext.current
-    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = clip.uri, key2 = clip.startMs) {
-        value = withContext(Dispatchers.IO) {
-            val retriever = MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(context, clip.uri)
-                retriever.getFrameAtTime(clip.startMs.coerceAtLeast(0L) * 1_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            } catch (_: Exception) {
-                null
-            } finally {
-                runCatching { retriever.release() }
-            }
-        }
-    }
-    Box(
-        Modifier.fillMaxWidth().height(58.dp).clip(RoundedCornerShape(8.dp)).background(PanelAlt),
-        contentAlignment = Alignment.Center
-    ) {
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap!!.asImageBitmap(),
-                contentDescription = "Video thumbnail for ${clip.name}",
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Icon(Icons.Default.Movie, null, tint = Muted, modifier = Modifier.size(22.dp))
-        }
-    }
-}
-
-@Composable
 private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long) {
     val active = layers.filter { timelinePositionMs >= it.startMs && timelinePositionMs < it.endMs }
     Box(Modifier.fillMaxSize()) {
