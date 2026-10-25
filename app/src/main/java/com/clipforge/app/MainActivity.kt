@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Bitmap.CompressFormat
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
@@ -185,7 +186,8 @@ private data class PhotoLayer(
     val position: String = "bottom-right",
     val scale: Float = 0.30f,
     val opacity: Float = 1f,
-    val rotation: Float = 0f
+    val rotation: Float = 0f,
+    val fullFrame: Boolean = false
 )
 
 private data class Project(
@@ -546,6 +548,55 @@ private fun ClipForgeApp() {
         }
     }
 
+    fun freezeFrameSelected() {
+        val clip = selected ?: run {
+            message = "Import and select a video before creating a freeze frame."
+            return
+        }
+        val frameTimeMs = (clip.startMs + position).coerceIn(clip.startMs, (clip.endMs - 1L).coerceAtLeast(clip.startMs))
+        scope.launch {
+            try {
+                message = "Capturing freeze frame…"
+                val layer = withContext(Dispatchers.IO) {
+                    val retriever = MediaMetadataRetriever()
+                    var bitmap: Bitmap? = null
+                    try {
+                        retriever.setDataSource(context, clip.uri)
+                        bitmap = retriever.getFrameAtTime(frameTimeMs * 1_000L, MediaMetadataRetriever.OPTION_CLOSEST)
+                            ?: throw IllegalStateException("Couldn't decode a frame from this video.")
+                        val freezeFile = File(context.filesDir, "clipforge_freeze_" + System.currentTimeMillis() + ".jpg")
+                        freezeFile.outputStream().use { stream ->
+                            if (!bitmap!!.compress(CompressFormat.JPEG, 94, stream)) {
+                                throw IllegalStateException("Couldn't save the captured frame.")
+                            }
+                        }
+                        val globalStart = timelinePositionMs.coerceIn(0L, (timelineDurationMs - 100L).coerceAtLeast(0L))
+                        val globalEnd = (globalStart + 1_500L).coerceAtMost(timelineDurationMs).coerceAtLeast(globalStart + 100L)
+                        PhotoLayer(
+                            uri = Uri.fromFile(freezeFile),
+                            name = "Freeze frame " + time(position),
+                            startMs = globalStart,
+                            endMs = globalEnd,
+                            position = "center",
+                            scale = 1f,
+                            opacity = 1f,
+                            rotation = 0f,
+                            fullFrame = true
+                        )
+                    } finally {
+                        runCatching { bitmap?.recycle() }
+                        runCatching { retriever.release() }
+                    }
+                }
+                recordUndo()
+                photoLayers = photoLayers + layer
+                message = "Freeze frame added to the Layers track for " + time(layer.endMs - layer.startMs) + "."
+            } catch (error: Exception) {
+                message = "Freeze frame failed: " + (error.message ?: "unsupported video")
+            }
+        }
+    }
+
     fun importVideos() { videoPicker.launch(arrayOf("video/*")) }
     fun importMusic() { musicPicker.launch(arrayOf("audio/*")) }
     fun importPhotoLayers() { photoLayerPicker.launch(arrayOf("image/*")) }
@@ -723,6 +774,7 @@ private fun ClipForgeApp() {
                     canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
                     onUndo = ::undoProject, onRedo = ::redoProject,
                     onImport = ::importVideos,
+                    onFreeze = ::freezeFrameSelected,
                     onSelect = { selectedId = it },
                     onSeek = { positionMs -> player.seekTo(positionMs); position = positionMs },
                     onPlay = { if (player.isPlaying) player.pause() else player.play() },
@@ -834,7 +886,7 @@ private fun EditorPanel(
     position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
     photoLayers: List<PhotoLayer>, message: String?,
     canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
-    onImport: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
+    onImport: () -> Unit, onFreeze: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
 ) {
@@ -970,6 +1022,7 @@ private fun EditorPanel(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     ActionButton("Split", Icons.Default.ContentCut, onSplit, Modifier.weight(1f), selected != null)
+                    ActionButton("Freeze", Icons.Default.Movie, onFreeze, Modifier.weight(1f), selected != null)
                     ActionButton("Up", Icons.Default.ArrowUpward, { onMove(-1) }, Modifier.weight(1f), selectedIndex > 0)
                     ActionButton("Down", Icons.Default.ArrowDownward, { onMove(1) }, Modifier.weight(1f), selectedIndex >= 0 && selectedIndex < clips.lastIndex)
                     ActionButton("Delete", Icons.Default.Delete, onDelete, Modifier.weight(1f), selected != null)
@@ -1574,7 +1627,10 @@ private fun LayersPanel(
                             Icon(Icons.Default.Layers, null, tint = Lime, modifier = Modifier.size(25.dp))
                             Spacer(Modifier.width(9.dp))
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("OVERLAY " + (index + 1), color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                                Text(
+                                    (if (layer.fullFrame) "FREEZE FRAME " else "OVERLAY ") + (index + 1),
+                                    color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp
+                                )
                                 Text(layer.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Icon(
@@ -1669,14 +1725,24 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
                     "bottom-left" -> Alignment.BottomStart
                     else -> Alignment.BottomEnd
                 }
-                Image(
-                    bitmap = bitmap!!.asImageBitmap(),
-                    contentDescription = layer.name,
-                    alpha = layer.opacity.coerceIn(0f, 1f),
-                    modifier = Modifier.align(alignment).padding(8.dp)
-                        .size((230f * layer.scale).dp)
-                        .graphicsLayer(rotationZ = layer.rotation)
-                )
+                if (layer.fullFrame) {
+                    Image(
+                        bitmap = bitmap!!.asImageBitmap(),
+                        contentDescription = layer.name,
+                        alpha = layer.opacity.coerceIn(0f, 1f),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().graphicsLayer(rotationZ = layer.rotation)
+                    )
+                } else {
+                    Image(
+                        bitmap = bitmap!!.asImageBitmap(),
+                        contentDescription = layer.name,
+                        alpha = layer.opacity.coerceIn(0f, 1f),
+                        modifier = Modifier.align(alignment).padding(8.dp)
+                            .size((230f * layer.scale).dp)
+                            .graphicsLayer(rotationZ = layer.rotation)
+                    )
+                }
             }
         }
     }
@@ -1886,7 +1952,7 @@ private fun buildEditedItems(
                 val layerSettings = StaticOverlaySettings.Builder()
                     .setBackgroundFrameAnchor(anchorX, anchorY)
                     .setOverlayFrameAnchor(0f, 0f)
-                    .setScale(layer.scale.coerceIn(0.12f, 0.7f), layer.scale.coerceIn(0.12f, 0.7f))
+                    .setScale(if (layer.fullFrame) 1f else layer.scale.coerceIn(0.12f, 0.7f), if (layer.fullFrame) 1f else layer.scale.coerceIn(0.12f, 0.7f))
                     .setAlphaScale(layer.opacity.coerceIn(0f, 1f))
                     .setRotationDegrees(layer.rotation.coerceIn(-180f, 180f))
                     .build()
@@ -2080,9 +2146,10 @@ private fun loadProject(context: Context): Project {
                 startMs = start,
                 endMs = end,
                 position = item.optString("position", "bottom-right").takeIf { it in listOf("top-left", "top-right", "center", "bottom-left", "bottom-right") } ?: "bottom-right",
-                scale = item.optDouble("scale", 0.30).toFloat().coerceIn(0.12f, 0.7f),
+                scale = item.optDouble("scale", 0.30).toFloat().coerceIn(0.12f, 1f),
                 opacity = item.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
-                rotation = item.optDouble("rotation", 0.0).toFloat().coerceIn(-180f, 180f)
+                rotation = item.optDouble("rotation", 0.0).toFloat().coerceIn(-180f, 180f),
+                fullFrame = item.optBoolean("fullFrame", false)
             ))
         }
     }
@@ -2149,6 +2216,7 @@ private fun saveProject(context: Context, project: Project) {
             put("scale", layer.scale)
             put("opacity", layer.opacity)
             put("rotation", layer.rotation)
+            put("fullFrame", layer.fullFrame)
         })
     }
     val markerArray = JSONArray()
