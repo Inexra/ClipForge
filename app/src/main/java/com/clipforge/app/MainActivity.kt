@@ -308,6 +308,10 @@ private fun ClipForgeApp() {
     var trimEnd by remember { mutableStateOf(0L) }
     var musicPlaying by remember { mutableStateOf(false) }
     var beatDetecting by remember { mutableStateOf(false) }
+    var autoClipDurationMs by remember { mutableStateOf(30_000L) }
+    var autoClipSuggestions by remember { mutableStateOf<List<AutoClipSuggestion>>(emptyList()) }
+    var autoClipSource by remember { mutableStateOf<Clip?>(null) }
+    var autoClipBusy by remember { mutableStateOf(false) }
 
     val player = remember(context) { ExoPlayer.Builder(context).build() }
     val audioPlayer = remember(context) { ExoPlayer.Builder(context).build() }
@@ -873,6 +877,81 @@ private fun ClipForgeApp() {
 
     fun updateClip(clip: Clip) { clips = clips.map { if (it.id == clip.id) clip else it } }
 
+    fun generateAutoClips() {
+        val source = selected ?: run {
+            message = "Import and select a long video before generating auto clips."
+            return
+        }
+        if (autoClipBusy) return
+        if (source.durationMs < 3_000L) {
+            message = "Choose a source clip at least 3 seconds long."
+            return
+        }
+        autoClipSource = source
+        autoClipSuggestions = emptyList()
+        autoClipBusy = true
+        scope.launch {
+            try {
+                val suggestions = withContext(Dispatchers.IO) {
+                    AutoClipMaker.analyze(
+                        context = context,
+                        uri = source.uri,
+                        sourceStartMs = source.startMs,
+                        sourceEndMs = source.endMs,
+                        targetDurationMs = autoClipDurationMs,
+                        language = CaptionLanguage.fromId(captionLanguageId)
+                    ) { status ->
+                        scope.launch { message = status }
+                    }
+                }
+                autoClipSuggestions = suggestions
+                message = "Auto Clip Maker found " + suggestions.size + " options. Review and add the highlights you want."
+            } catch (error: Exception) {
+                message = "Auto Clip Maker failed: " + (error.message ?: "unsupported source")
+            } finally {
+                autoClipBusy = false
+            }
+        }
+    }
+
+    fun makeSuggestedClip(source: Clip, suggestion: AutoClipSuggestion, ordinal: Int): Clip {
+        val start = (source.startMs + suggestion.startMs).coerceIn(source.startMs, (source.endMs - 100L).coerceAtLeast(source.startMs))
+        val end = (source.startMs + suggestion.endMs).coerceIn((start + 100L).coerceAtMost(source.endMs), source.endMs)
+        return source.copy(
+            id = UUID.randomUUID().toString(),
+            name = source.name + " · Auto " + ordinal,
+            startMs = start,
+            endMs = end,
+            transition = "Cut"
+        )
+    }
+
+    fun addAutoClipSuggestion(suggestion: AutoClipSuggestion) {
+        val source = autoClipSource ?: selected ?: run {
+            message = "Run Auto Clip Maker on a source video first."
+            return
+        }
+        recordUndo()
+        val added = makeSuggestedClip(source, suggestion, clips.size + 1)
+        clips = clips + added
+        selectedId = added.id
+        autoClipSuggestions = autoClipSuggestions.filterNot { it.id == suggestion.id }
+        message = "Added " + time(added.durationMs) + " highlight to the timeline."
+    }
+
+    fun addAllAutoClipSuggestions() {
+        val source = autoClipSource ?: selected ?: return
+        if (autoClipSuggestions.isEmpty()) return
+        recordUndo()
+        val added = autoClipSuggestions.mapIndexed { index, suggestion ->
+            makeSuggestedClip(source, suggestion, clips.size + index + 1)
+        }
+        clips = clips + added
+        selectedId = added.firstOrNull()?.id ?: selectedId
+        autoClipSuggestions = emptyList()
+        message = "Added " + added.size + " offline highlights to the timeline."
+    }
+
     fun commitTrim() {
         val clip = selected ?: return
         recordUndo()
@@ -1093,7 +1172,15 @@ private fun ClipForgeApp() {
                     onSplit = ::splitClip,
                     onDelete = ::deleteClip,
                     onMove = ::moveClip,
-                    onAdd = ::importVideos
+                    onAdd = ::importVideos,
+                    autoClipSuggestions = autoClipSuggestions,
+                    autoClipSourceName = autoClipSource?.name,
+                    autoClipDurationMs = autoClipDurationMs,
+                    autoClipBusy = autoClipBusy,
+                    onAutoClipDuration = { autoClipDurationMs = it },
+                    onGenerateAutoClips = ::generateAutoClips,
+                    onAddAutoClip = ::addAutoClipSuggestion,
+                    onAddAllAutoClips = ::addAllAutoClipSuggestions
                 )
                 1 -> AudioPanel(
                     musicName, music != null, musicPlaying, muteVideoAudio, message,
@@ -1231,7 +1318,15 @@ private fun EditorPanel(
     onSaveProjectBundle: () -> Unit, onOpenProjectBundle: () -> Unit,
     onImport: () -> Unit, onFreeze: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
-    onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
+    onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit,
+    autoClipSuggestions: List<AutoClipSuggestion>,
+    autoClipSourceName: String?,
+    autoClipDurationMs: Long,
+    autoClipBusy: Boolean,
+    onAutoClipDuration: (Long) -> Unit,
+    onGenerateAutoClips: () -> Unit,
+    onAddAutoClip: (AutoClipSuggestion) -> Unit,
+    onAddAllAutoClips: () -> Unit
 ) {
     val keyframeFraction = if (selected == null || selected.durationMs <= 0L) 0f else
         (position.toFloat() / selected.durationMs.toFloat()).coerceIn(0f, 1f)
@@ -1292,6 +1387,119 @@ private fun EditorPanel(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 9.dp)
             ) {
                 Text("Open project", fontSize = 10.sp, maxLines = 1)
+            }
+        }
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AutoAwesome, null, tint = Lime, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto Clip Maker", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Text("OFFLINE HIGHLIGHT FINDER", color = Lime, fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+                    }
+                    Text("ON DEVICE", color = Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+                Text(
+                    "Find short highlight moments using bundled speech recognition and local scene-change analysis. No video is uploaded.",
+                    color = Muted, fontSize = 11.sp, lineHeight = 15.sp
+                )
+                Text(
+                    if (selected == null) "Select a source video to begin."
+                    else "Source: " + (autoClipSourceName ?: selected.name) + " · " + time(selected.durationMs),
+                    color = if (selected == null) Muted else Color.White, fontSize = 11.sp,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf(15_000L, 30_000L, 45_000L, 60_000L).forEach { length ->
+                        val active = autoClipDurationMs == length
+                        Surface(
+                            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = !autoClipBusy) { onAutoClipDuration(length) },
+                            color = if (active) Lime else PanelAlt,
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                (length / 1_000L).toString() + " sec",
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                Button(
+                    onClick = onGenerateAutoClips,
+                    enabled = selected != null && selected.durationMs >= 3_000L && !autoClipBusy,
+                    modifier = Modifier.fillMaxWidth().height(46.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Bg)
+                ) {
+                    if (autoClipBusy) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp), color = Bg, strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Analyzing on device…", fontWeight = FontWeight.Bold)
+                    } else {
+                        Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("Find highlights", fontWeight = FontWeight.Bold)
+                    }
+                }
+                if (autoClipBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Lime)
+                if (autoClipSuggestions.isNotEmpty()) {
+                    HorizontalDivider(color = PanelAlt)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("SUGGESTED HIGHLIGHTS", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(autoClipSuggestions.size.toString() + " found", color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                    autoClipSuggestions.forEachIndexed { index, suggestion ->
+                        Card(shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = PanelAlt)) {
+                            Column(Modifier.fillMaxWidth().padding(11.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        Modifier.size(30.dp).clip(CircleShape).background(Bg),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text((index + 1).toString(), color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(suggestion.reason, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            time(suggestion.startMs) + " – " + time(suggestion.endMs) + " · score " + suggestion.score,
+                                            color = Muted, fontSize = 10.sp
+                                        )
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onAddAutoClip(suggestion) },
+                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(9.dp)
+                                    ) { Text("Add", fontSize = 10.sp) }
+                                }
+                                if (suggestion.transcriptExcerpt.isNotBlank()) {
+                                    Text(
+                                        "“" + suggestion.transcriptExcerpt + "”",
+                                        color = Muted, fontSize = 10.sp, lineHeight = 14.sp,
+                                        maxLines = 3, overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (autoClipSuggestions.size > 1) {
+                        OutlinedButton(
+                            onClick = onAddAllAutoClips,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(11.dp)
+                        ) {
+                            Icon(Icons.Default.Add, null, modifier = Modifier.size(17.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Add all " + autoClipSuggestions.size + " highlights to timeline")
+                        }
+                    }
+                }
             }
         }
         if (selected == null) {
@@ -1360,7 +1568,7 @@ private fun EditorPanel(
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             )
                         }
-                        val totalBeforeSelected = clips.take(selectedIndex.coerceAtLeast(0)).sumOf { (it.durationMs / it.speed).toLong() }
+                        val totalBeforeSelected = clipTimelineStartOffsetsMs(clips).getOrNull(selectedIndex) ?: 0L
                         val globalPreviewPosition = totalBeforeSelected + if (selected != null) (position / selected.speed).toLong() else 0L
                         PhotoLayerPreview(photoLayers, globalPreviewPosition)
                     }
