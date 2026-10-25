@@ -111,6 +111,8 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.audio.SpeedProvider
+import androidx.media3.common.audio.DefaultGainProvider
+import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.Brightness
 import androidx.media3.effect.BitmapOverlay
@@ -203,7 +205,10 @@ private data class Project(
     val photoLayers: List<PhotoLayer> = emptyList(),
     val voiceover: Uri? = null,
     val beatMarkers: List<Long> = emptyList(),
-    val captionLanguageId: String = "english"
+    val captionLanguageId: String = "english",
+    val sourceVolume: Float = 1f,
+    val musicVolume: Float = 1f,
+    val voiceoverVolume: Float = 1f
 )
 
 class MainActivity : ComponentActivity() {
@@ -231,6 +236,9 @@ private fun ClipForgeApp() {
     var selectedId by remember { mutableStateOf<String?>(null) }
     var music by remember { mutableStateOf<Uri?>(null) }
     var musicName by remember { mutableStateOf<String?>(null) }
+    var sourceVolume by remember { mutableStateOf(1f) }
+    var musicVolume by remember { mutableStateOf(1f) }
+    var voiceoverVolume by remember { mutableStateOf(1f) }
     var titleText by remember { mutableStateOf("") }
     var brightness by remember { mutableStateOf(0f) }
     var saturation by remember { mutableStateOf(0f) }
@@ -280,7 +288,8 @@ private fun ClipForgeApp() {
 
     fun currentProject() = Project(
         clips, music, titleText, brightness, muteVideoAudio, format,
-        captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId
+        captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
+        sourceVolume, musicVolume, voiceoverVolume
     )
     fun recordUndo() {
         val snapshot = currentProject()
@@ -293,6 +302,9 @@ private fun ClipForgeApp() {
         selectedId = project.clips.firstOrNull()?.id
         music = project.music
         musicName = project.music?.let { nameForUri(context, it) }
+        sourceVolume = project.sourceVolume
+        musicVolume = project.musicVolume
+        voiceoverVolume = project.voiceoverVolume
         titleText = project.titleText
         brightness = project.brightness
         saturation = project.saturation
@@ -325,6 +337,9 @@ private fun ClipForgeApp() {
         selectedId = saved.clips.firstOrNull()?.id
         music = saved.music
         musicName = saved.music?.let { withContext(Dispatchers.IO) { nameForUri(context, it) } }
+        sourceVolume = saved.sourceVolume
+        musicVolume = saved.musicVolume
+        voiceoverVolume = saved.voiceoverVolume
         titleText = saved.titleText
         brightness = saved.brightness
         saturation = saved.saturation
@@ -340,11 +355,12 @@ private fun ClipForgeApp() {
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, muteVideoAudio, format) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format) {
         if (loaded) withContext(Dispatchers.IO) {
             saveProject(context, Project(
                 clips, music, titleText, brightness, muteVideoAudio, format,
-                captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId
+                captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
+                sourceVolume, musicVolume, voiceoverVolume
             ))
         }
     }
@@ -694,7 +710,7 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format)
+            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume)
 
             val mainSequence = if (muteVideoAudio) {
                 EditedMediaItemSequence.withVideoFrom(editItems)
@@ -704,10 +720,17 @@ private fun ClipForgeApp() {
             val sequenceList = mutableListOf(mainSequence)
             music?.let { audioUri ->
                 val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(audioUri)).build()
-                sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(audioItem)).buildUpon().setIsLooping(true).build())
+                val audioGain = GainProcessor(DefaultGainProvider.Builder(musicVolume.coerceIn(0f, 1f)).build())
+                val adjustedAudio = EditedMediaItem.Builder(MediaItem.fromUri(audioUri))
+                    .setEffects(Effects(listOf(audioGain), emptyList()))
+                    .build()
+                sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(adjustedAudio)).buildUpon().setIsLooping(true).build())
             }
             voiceover?.let { voiceUri ->
-                val voiceItem = EditedMediaItem.Builder(MediaItem.fromUri(voiceUri)).build()
+                val voiceGain = GainProcessor(DefaultGainProvider.Builder(voiceoverVolume.coerceIn(0f, 1f)).build())
+                val voiceItem = EditedMediaItem.Builder(MediaItem.fromUri(voiceUri))
+                    .setEffects(Effects(listOf(voiceGain), emptyList()))
+                    .build()
                 sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(voiceItem)))
             }
             val composition = Composition.Builder(sequenceList).build()
@@ -794,6 +817,9 @@ private fun ClipForgeApp() {
                     voiceoverName = voiceoverName,
                     hasVoiceover = voiceover != null,
                     voiceoverRecording = voiceoverRecording,
+                    sourceVolume = sourceVolume,
+                    musicVolume = musicVolume,
+                    voiceoverVolume = voiceoverVolume,
                     beatMarkers = beatMarkers,
                     timelinePositionMs = timelinePositionMs,
                     timelineDurationMs = timelineDurationMs,
@@ -805,6 +831,9 @@ private fun ClipForgeApp() {
                         else { audioPlayer.play(); musicPlaying = true }
                     },
                     onMute = { recordUndo(); muteVideoAudio = it },
+                    onSourceVolume = { recordUndo(); sourceVolume = it },
+                    onMusicVolume = { recordUndo(); musicVolume = it },
+                    onVoiceoverVolume = { recordUndo(); voiceoverVolume = it },
                     onStartVoiceover = ::startVoiceRecording,
                     onStopVoiceover = ::stopVoiceRecording,
                     onRemoveVoiceover = {
@@ -1058,11 +1087,28 @@ private fun EditorPanel(
 }
 
 @Composable
+private fun VolumeControl(label: String, value: Float, onChange: (Float) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Muted, fontSize = 12.sp, modifier = Modifier.width(130.dp))
+        Slider(
+            value = value.coerceIn(0f, 1f),
+            onValueChange = onChange,
+            valueRange = 0f..1f,
+            modifier = Modifier.weight(1f)
+        )
+        Text((value * 100).toInt().toString() + "%", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(38.dp))
+    }
+}
+
+@Composable
 private fun AudioPanel(
     musicName: String?, hasMusic: Boolean, playing: Boolean, muted: Boolean, message: String?,
     voiceoverName: String?, hasVoiceover: Boolean, voiceoverRecording: Boolean,
+    sourceVolume: Float, musicVolume: Float, voiceoverVolume: Float,
     beatMarkers: List<Long>, timelinePositionMs: Long, timelineDurationMs: Long,
     onPick: () -> Unit, onRemove: () -> Unit, onPreview: () -> Unit, onMute: (Boolean) -> Unit,
+    onSourceVolume: (Float) -> Unit, onMusicVolume: (Float) -> Unit, onVoiceoverVolume: (Float) -> Unit,
     onStartVoiceover: () -> Unit, onStopVoiceover: () -> Unit, onRemoveVoiceover: () -> Unit,
     onMarkBeat: () -> Unit, onDeleteBeat: (Long) -> Unit
 ) {
@@ -1189,6 +1235,15 @@ private fun AudioPanel(
                     Text("Keep it off to retain speech and source sound during export.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
                 }
                 Switch(checked = muted, onCheckedChange = onMute)
+            }
+        }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Track mixer", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                VolumeControl("Original video", sourceVolume, onSourceVolume)
+                VolumeControl("Background music", musicVolume, onMusicVolume)
+                VolumeControl("Voice-over", voiceoverVolume, onVoiceoverVolume)
+                Text("Volumes are rendered independently into the final audio mix. Muting original audio overrides its volume setting.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
             }
         }
         Text("Background music loops across the timeline when needed. Make sure you have permission to use music in published videos.", color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
@@ -1849,7 +1904,8 @@ private fun buildEditedItems(
     brightness: Float,
     saturation: Float,
     filterPreset: String,
-    format: String
+    format: String,
+    sourceVolume: Float
 ): List<EditedMediaItem> {
     val result = mutableListOf<EditedMediaItem>()
     clips.forEachIndexed { clipIndex, clip ->
@@ -1997,8 +2053,9 @@ private fun buildEditedItems(
                 .build()
             val mediaItem = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
             result.add(
+                val sourceGain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
                 EditedMediaItem.Builder(mediaItem)
-                    .setEffects(Effects(emptyList(), effects))
+                    .setEffects(Effects(listOf(sourceGain), effects))
                     .setSpeed(speedProvider)
                     .build()
             )
@@ -2171,7 +2228,10 @@ private fun loadProject(context: Context): Project {
         photoLayers = layerList,
         voiceover = p.getString("voiceover", null)?.let { Uri.parse(it) },
         beatMarkers = markers.sorted(),
-        captionLanguageId = p.getString("captionLanguage", "english") ?: "english"
+        captionLanguageId = p.getString("captionLanguage", "english") ?: "english",
+        sourceVolume = p.getFloat("sourceVolume", 1f).coerceIn(0f, 1f),
+        musicVolume = p.getFloat("musicVolume", 1f).coerceIn(0f, 1f),
+        voiceoverVolume = p.getFloat("voiceoverVolume", 1f).coerceIn(0f, 1f)
     )
 }
 
@@ -2228,6 +2288,9 @@ private fun saveProject(context: Context, project: Project) {
         .putString("voiceover", project.voiceover?.toString())
         .putString("beatMarkers", markerArray.toString())
         .putString("captionLanguage", project.captionLanguageId)
+        .putFloat("sourceVolume", project.sourceVolume)
+        .putFloat("musicVolume", project.musicVolume)
+        .putFloat("voiceoverVolume", project.voiceoverVolume)
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
