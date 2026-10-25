@@ -3812,7 +3812,12 @@ private fun loadProject(context: Context): Project {
                     speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant",
                     cropZoom = o.optDouble("cropZoom", 1.0).toFloat().coerceIn(1f, 2.5f),
                     cropX = o.optDouble("cropX", 0.0).toFloat().coerceIn(-1f, 1f),
-                    cropY = o.optDouble("cropY", 0.0).toFloat().coerceIn(-1f, 1f)
+                    cropY = o.optDouble("cropY", 0.0).toFloat().coerceIn(-1f, 1f),
+                    audioVolumeStart = o.optDouble("audioVolumeStart", 1.0).toFloat().coerceIn(0f, 1f),
+                    audioVolumeMid = o.optDouble("audioVolumeMid", 1.0).toFloat().coerceIn(0f, 1f),
+                    audioVolumeEnd = o.optDouble("audioVolumeEnd", 1.0).toFloat().coerceIn(0f, 1f),
+                    audioFadeInMs = o.optLong("audioFadeInMs", 0L).coerceIn(0L, 10_000L),
+                    audioFadeOutMs = o.optLong("audioFadeOutMs", 0L).coerceIn(0L, 10_000L)
                 ))
             }
         }
@@ -3825,13 +3830,26 @@ private fun loadProject(context: Context): Project {
             val start = item.optLong("start", 0L)
             val end = item.optLong("end", 0L)
             val text = item.optString("text", "")
+            val tokens = mutableListOf<CaptionToken>()
+            item.optJSONArray("tokens")?.let { tokenArray ->
+                for (tokenIndex in 0 until tokenArray.length()) {
+                    val token = tokenArray.optJSONObject(tokenIndex) ?: continue
+                    val tokenText = token.optString("text", "")
+                    val tokenStart = token.optLong("start", 0L)
+                    val tokenEnd = token.optLong("end", 0L)
+                    if (tokenText.isNotBlank() && tokenEnd > tokenStart) {
+                        tokens.add(CaptionToken(tokenText, tokenStart, tokenEnd))
+                    }
+                }
+            }
             if (end > start && text.isNotBlank() && clips.any { it.id == item.optString("clipId") }) {
                 captionList.add(CaptionLine(
                     id = item.optString("id", UUID.randomUUID().toString()),
                     clipId = item.optString("clipId"),
                     startMs = start,
                     endMs = end,
-                    text = text
+                    text = text,
+                    tokens = tokens
                 ))
             }
         }
@@ -3883,9 +3901,12 @@ private fun loadProject(context: Context): Project {
         voiceoverVolume = p.getFloat("voiceoverVolume", 1f).coerceIn(0f, 1f),
         exportQuality = p.getString("exportQuality", "High")?.takeIf { it in listOf("Saver", "Standard", "High", "Ultra") } ?: "High",
         exportFrameRate = p.getInt("exportFrameRate", 30).coerceIn(24, 60).let { if (it in listOf(24, 30, 60)) it else 30 },
-        captionStyle = p.getString("captionStyle", "Classic")?.takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal") } ?: "Classic",
+        captionStyle = p.getString("captionStyle", "Classic")?.takeIf { it in listOf("Classic", "Yellow Pop", "Neon", "Minimal", "Karaoke") } ?: "Classic",
         captionPosition = p.getString("captionPosition", "Bottom")?.takeIf { it in listOf("Top", "Center", "Bottom") } ?: "Bottom",
-        captionScale = p.getFloat("captionScale", 1f).coerceIn(0.7f, 1.5f)
+        captionScale = p.getFloat("captionScale", 1f).coerceIn(0.7f, 1.5f),
+        musicFadeInMs = p.getLong("musicFadeInMs", 0L).coerceIn(0L, 5_000L),
+        musicFadeOutMs = p.getLong("musicFadeOutMs", 0L).coerceIn(0L, 5_000L),
+        duckMusicUnderVoiceover = p.getBoolean("duckMusicUnderVoiceover", false)
     )
 }
 
@@ -3912,6 +3933,11 @@ private fun saveProject(context: Context, project: Project) {
             put("cropZoom", clip.cropZoom)
             put("cropX", clip.cropX)
             put("cropY", clip.cropY)
+            put("audioVolumeStart", clip.audioVolumeStart)
+            put("audioVolumeMid", clip.audioVolumeMid)
+            put("audioVolumeEnd", clip.audioVolumeEnd)
+            put("audioFadeInMs", clip.audioFadeInMs)
+            put("audioFadeOutMs", clip.audioFadeOutMs)
         })
     }
     val subtitleArray = JSONArray()
@@ -3922,6 +3948,15 @@ private fun saveProject(context: Context, project: Project) {
             put("start", caption.startMs)
             put("end", caption.endMs)
             put("text", caption.text)
+            put("tokens", JSONArray().apply {
+                caption.tokens.forEach { token ->
+                    put(JSONObject().apply {
+                        put("text", token.text)
+                        put("start", token.startMs)
+                        put("end", token.endMs)
+                    })
+                }
+            })
         })
     }
     val layerArray = JSONArray()
@@ -3958,6 +3993,9 @@ private fun saveProject(context: Context, project: Project) {
         .putString("captionStyle", project.captionStyle)
         .putString("captionPosition", project.captionPosition)
         .putFloat("captionScale", project.captionScale)
+        .putLong("musicFadeInMs", project.musicFadeInMs)
+        .putLong("musicFadeOutMs", project.musicFadeOutMs)
+        .putBoolean("duckMusicUnderVoiceover", project.duckMusicUnderVoiceover)
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
