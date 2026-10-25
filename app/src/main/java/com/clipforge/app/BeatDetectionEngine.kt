@@ -157,7 +157,8 @@ object BeatDetectionEngine {
                 throw IllegalStateException("The music file was too short or couldn't be decoded.")
             }
 
-            val energies = windows.values.map { it.rms() }
+            val entries = windows.entries.toList()
+            val energies = entries.map { it.value.rms() }
             val smoothed = FloatArray(energies.size) { index ->
                 val from = max(0, index - 1)
                 val to = minOf(energies.lastIndex, index + 1)
@@ -175,16 +176,8 @@ object BeatDetectionEngine {
                     level > smoothed[index + 1] &&
                     level >= averageEnergy * 1.08f
                 if (!isPeak) continue
-                val timestampMs = windows.keys.elementAt(index) * WINDOW_MS
-                if (timestampMs - lastMarkerMs < MIN_SPACING_MS) {
-                    if (detected.isNotEmpty() && level > smoothed.getOrElse(
-                            ((lastMarkerMs / WINDOW_MS).toInt()).coerceIn(0, smoothed.lastIndex)
-                        ) + 0.03f) {
-                        detected[detected.lastIndex] = timestampMs
-                        lastMarkerMs = timestampMs
-                    }
-                    continue
-                }
+                val timestampMs = entries[index].key * WINDOW_MS
+                if (timestampMs - lastMarkerMs < MIN_SPACING_MS) continue
                 detected.add(timestampMs)
                 lastMarkerMs = timestampMs
                 if (detected.size >= MAX_MARKERS) break
