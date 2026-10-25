@@ -2503,6 +2503,51 @@ private fun styledCaptionText(text: String, style: String): SpannableString {
     }
 }
 
+
+private fun captionAnnotatedString(caption: CaptionLine, style: String, timeMs: Long): AnnotatedString {
+    return buildAnnotatedString {
+        append(caption.text)
+        if (style == "Karaoke") {
+            var searchFrom = 0
+            caption.tokens.forEach { token ->
+                val wordStart = caption.text.indexOf(token.text, searchFrom)
+                if (wordStart >= 0) {
+                    val wordEnd = (wordStart + token.text.length).coerceAtMost(caption.text.length)
+                    val active = timeMs >= token.startMs && timeMs < token.endMs
+                    addStyle(
+                        SpanStyle(
+                            color = if (active) Color.Black else Color.White,
+                            background = if (active) Color(0xFFFFDD41) else Color.Transparent,
+                            fontWeight = FontWeight.ExtraBold
+                        ),
+                        wordStart,
+                        wordEnd
+                    )
+                    searchFrom = wordEnd
+                }
+            }
+        }
+    }
+}
+
+private fun styledCaptionTextAtTime(caption: CaptionLine, style: String, timeMs: Long): SpannableString {
+    val output = styledCaptionText(caption.text, if (style == "Karaoke") "Classic" else style)
+    if (style != "Karaoke" || output.isEmpty()) return output
+    var searchFrom = 0
+    caption.tokens.forEach { token ->
+        val wordStart = output.toString().indexOf(token.text, searchFrom)
+        if (wordStart >= 0) {
+            val wordEnd = (wordStart + token.text.length).coerceAtMost(output.length)
+            if (timeMs >= token.startMs && timeMs < token.endMs) {
+                output.setSpan(ForegroundColorSpan(AndroidColor.BLACK), wordStart, wordEnd, 0)
+                output.setSpan(BackgroundColorSpan(AndroidColor.rgb(255, 221, 65)), wordStart, wordEnd, 0)
+            }
+            searchFrom = wordEnd
+        }
+    }
+    return output
+}
+
 private fun captionAnchorY(position: String): Float = when (position) {
     "Top" -> 0.78f
     "Center" -> 0f
@@ -2518,7 +2563,7 @@ private fun captionComposeTextColor(style: String): Color = when (style) {
 private fun captionComposeBackground(style: String): Color = when (style) {
     "Yellow Pop" -> Color(0xFFFFDD41)
     "Neon" -> Color(0xE1081630)
-    "Classic" -> Color.Black.copy(alpha = 0.82f)
+    "Classic", "Karaoke" -> Color.Black.copy(alpha = 0.82f)
     else -> Color.Transparent
 }
 
@@ -3120,7 +3165,12 @@ private fun makeCaptionLines(clipId: String, words: List<WordTiming>, durationMs
         val start = group.first().startMs.coerceIn(0L, durationMs.coerceAtLeast(1L) - 1L)
         val end = group.last().endMs.coerceIn(start + 1L, durationMs.coerceAtLeast(start + 1L))
         val text = group.joinToString(" ") { it.text }.trim()
-        if (text.isNotBlank()) output.add(CaptionLine(clipId = clipId, startMs = start, endMs = end, text = text))
+        val tokens = group.mapNotNull { word ->
+            val tokenStart = word.startMs.coerceIn(start, (end - 1L).coerceAtLeast(start))
+            val tokenEnd = word.endMs.coerceIn(tokenStart + 1L, end)
+            if (tokenEnd > tokenStart) CaptionToken(word.text, tokenStart, tokenEnd) else null
+        }
+        if (text.isNotBlank()) output.add(CaptionLine(clipId = clipId, startMs = start, endMs = end, text = text, tokens = tokens))
         group.clear()
     }
     ordered.forEach { word ->
