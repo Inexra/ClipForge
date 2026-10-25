@@ -157,7 +157,7 @@ object ProjectArchive {
             while (keys.hasNext()) {
                 val key = keys.next()
                 when (key) {
-                    "brightness", "saturation", "sourceVolume", "musicVolume", "voiceoverVolume" ->
+                    "brightness", "saturation", "sourceVolume", "musicVolume", "voiceoverVolume", "captionScale" ->
                         editor.putFloat(key, json.optDouble(key, 0.0).toFloat())
                     "exportFrameRate" -> editor.putInt(key, json.optInt(key, 30))
                     "mute" -> editor.putBoolean(key, json.optBoolean(key, false))
