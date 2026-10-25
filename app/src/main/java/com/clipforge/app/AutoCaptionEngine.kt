@@ -12,10 +12,7 @@ import org.vosk.Recognizer
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.zip.ZipInputStream
@@ -31,21 +28,10 @@ data class CaptionSource(val id: String, val uri: Uri, val startMs: Long, val en
 enum class CaptionLanguage(
     val id: String,
     val displayName: String,
-    val modelName: String,
-    val modelUrl: String
+    val modelName: String
 ) {
-    ENGLISH_US(
-        "english",
-        "English",
-        "vosk-model-small-en-us-0.15",
-        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-    ),
-    HINDI(
-        "hindi",
-        "Hindi",
-        "vosk-model-small-hi-0.22",
-        "https://alphacephei.com/vosk/models/vosk-model-small-hi-0.22.zip"
-    );
+    ENGLISH_US("english", "English", "vosk-model-small-en-us-0.15"),
+    HINDI("hindi", "Hindi", "vosk-model-small-hi-0.22");
 
     companion object {
         fun fromId(id: String): CaptionLanguage =
@@ -264,45 +250,22 @@ object AutoCaptionEngine {
             return destination
         }
 
+        val assetPath = "offline-caption-models/$modelName.zip"
         destination.deleteRecursively()
         destination.mkdirs()
-        val archive = File(context.cacheDir, "$modelName.zip")
-        val connection = URL(language.modelUrl).openConnection() as HttpURLConnection
-        connection.connectTimeout = 20_000
-        connection.readTimeout = 30_000
-        connection.instanceFollowRedirects = true
+        val root = destination.canonicalPath + File.separator
         try {
-            onStatus("Downloading offline " + language.displayName + " caption model (about 40 MB)…")
-            connection.connect()
-            if (connection.responseCode !in 200..299) {
-                throw IllegalStateException("Model download failed (HTTP ${connection.responseCode}). Check your internet and retry.")
+            onStatus("Preparing bundled offline " + language.displayName + " speech model…")
+            val modelArchive = try {
+                context.assets.open(assetPath)
+            } catch (error: Exception) {
+                throw IllegalStateException(
+                    "This ClipForge build is missing its bundled " + language.displayName +
+                        " offline caption model. Install the official APK built by GitHub Actions.",
+                    error
+                )
             }
-            val total = connection.contentLengthLong
-            var received = 0L
-            connection.inputStream.use { input ->
-                FileOutputStream(archive).use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    var count: Int
-                    var nextReport = 4L * 1024 * 1024
-                    while (input.read(buffer).also { count = it } >= 0) {
-                        if (count == 0) continue
-                        output.write(buffer, 0, count)
-                        received += count
-                        if (received >= nextReport) {
-                            val progress = if (total > 0) " (${received / (1024 * 1024)} / ${total / (1024 * 1024)} MB)" else ""
-                            onStatus("Downloading offline " + language.displayName + " caption model$progress…")
-                            nextReport += 4L * 1024 * 1024
-                        }
-                    }
-                }
-            }
-        } finally {
-            connection.disconnect()
-        }
-
-        try {
-            val root = destination.canonicalPath + File.separator
-            ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
+            ZipInputStream(BufferedInputStream(modelArchive)).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     var relative = entry.name.removePrefix("$modelName/")
@@ -310,9 +273,11 @@ object AutoCaptionEngine {
                     if (relative.isNotBlank()) {
                         val target = File(destination, relative)
                         if (!target.canonicalPath.startsWith(root)) {
-                            throw IllegalStateException("Invalid path found in caption model archive.")
+                            throw IllegalStateException("Invalid path found in bundled caption model archive.")
                         }
-                        if (entry.isDirectory) target.mkdirs() else {
+                        if (entry.isDirectory) {
+                            target.mkdirs()
+                        } else {
                             target.parentFile?.mkdirs()
                             FileOutputStream(target).use { out -> zip.copyTo(out) }
                         }
@@ -320,12 +285,14 @@ object AutoCaptionEngine {
                     zip.closeEntry()
                 }
             }
-        } finally {
-            archive.delete()
+        } catch (error: Exception) {
+            destination.deleteRecursively()
+            throw error
         }
+
         if (!File(destination, "am/final.mdl").exists() || !File(destination, "conf/mfcc.conf").exists()) {
             destination.deleteRecursively()
-            throw IllegalStateException("The caption model archive was incomplete. Try again.")
+            throw IllegalStateException("The bundled caption model is incomplete. Install the latest ClipForge APK.")
         }
         return destination
     }
