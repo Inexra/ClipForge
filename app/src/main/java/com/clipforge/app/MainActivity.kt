@@ -13,10 +13,10 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
-import android.text.BackgroundColorSpan
 import android.text.SpannableString
-import android.text.StyleSpan
-import android.text.ForegroundColorSpan
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
