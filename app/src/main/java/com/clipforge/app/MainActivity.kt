@@ -29,6 +29,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -150,10 +154,10 @@ import java.util.Locale
 import java.util.UUID
 import kotlin.math.max
 
-private val Bg = Color(0xFF0D0F14)
-private val Panel = Color(0xFF171A22)
-private val PanelAlt = Color(0xFF232833)
-private val Lime = Color(0xFFB8F35A)
+private val Bg = Color(0xFF0B0D0F)
+private val Panel = Color(0xFF15181B)
+private val PanelAlt = Color(0xFF22262A)
+private val Lime = Color(0xFFB7E19B)
 private val Muted = Color(0xFF9BA2B1)
 private const val PREFS = "clipforge_project_v2"
 
@@ -977,13 +981,14 @@ private fun ClipForgeApp() {
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 17.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(17.dp)
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             AppHeader(clips.size)
-            when (tab) {
+            Crossfade(targetState = tab, animationSpec = tween(durationMillis = 180), label = "editor-workspace") { activeTab ->
+                when (activeTab) {
                 0 -> EditorPanel(
-                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, captionStyle, captionPosition, captionScale, message,
+                    clips, selectedId, selectedIndex, selected, format, player, position, trimStart, trimEnd, titleText, captions, photoLayers, captionStyle, captionPosition, captionScale, message,
                     canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
                     onUndo = ::undoProject, onRedo = ::redoProject,
                     onSaveProjectBundle = ::exportProjectBundle,
@@ -1093,8 +1098,9 @@ private fun ClipForgeApp() {
                     onQuality = { exportQuality = it },
                     onFrameRate = { exportFrameRate = it }
                 )
+                }
             }
-                        Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(8.dp))
         }
         NavigationBar(tab) { tab = it }
     }
@@ -1102,23 +1108,36 @@ private fun ClipForgeApp() {
 
 @Composable
 private fun AppHeader(count: Int) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(43.dp).clip(RoundedCornerShape(14.dp)).background(Lime), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.ContentCut, null, tint = Bg, modifier = Modifier.size(24.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Lime),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.ContentCut, null, tint = Bg, modifier = Modifier.size(22.dp))
         }
-        Spacer(Modifier.width(11.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("ClipForge", fontSize = 23.sp, fontWeight = FontWeight.ExtraBold)
-            Text("MOBILE VIDEO STUDIO", fontSize = 9.sp, color = Muted, letterSpacing = 1.5.sp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text("ClipForge", fontSize = 22.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp)
+            Text("VIDEO EDITOR", fontSize = 9.sp, color = Muted, letterSpacing = 1.7.sp, fontWeight = FontWeight.Medium)
         }
-        Text(count.toString() + " CLIPS", color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.clip(CircleShape).background(Panel).padding(horizontal = 11.dp, vertical = 8.dp))
+        Row(
+            modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(PanelAlt).padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Icon(Icons.Default.Movie, null, tint = Lime, modifier = Modifier.size(14.dp))
+            Text(count.toString(), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (count == 1) "clip" else "clips", color = Muted, fontSize = 11.sp)
+        }
     }
 }
 
 @Composable
 private fun EditorPanel(
-    clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, player: ExoPlayer,
+    clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, format: String, player: ExoPlayer,
     position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
     photoLayers: List<PhotoLayer>, captionStyle: String, captionPosition: String, captionScale: Float, message: String?,
     canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
@@ -1129,6 +1148,12 @@ private fun EditorPanel(
 ) {
     val keyframeFraction = if (selected == null || selected.durationMs <= 0L) 0f else
         (position.toFloat() / selected.durationMs.toFloat()).coerceIn(0f, 1f)
+    val previewAspect = when {
+        format.startsWith("9:16") -> 9f / 16f
+        format.startsWith("16:9") || format == "16:9 Video" -> 16f / 9f
+        format == "1:1 Square" -> 1f
+        else -> 1.22f
+    }
     val previewZoom = selected?.let {
         interpolateThree(it.zoomStart, it.zoomMid, it.zoomEnd, keyframeFraction, it.motionCurve)
     } ?: 1f
@@ -1151,8 +1176,8 @@ private fun EditorPanel(
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Your timeline", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-            Text("Import • trim • split • arrange • export", fontSize = 12.sp, color = Muted)
+            Text("Timeline", fontSize = 25.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp)
+            Text("Edit clips and build your sequence", fontSize = 12.sp, color = Muted)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onUndo, enabled = canUndo, shape = RoundedCornerShape(11.dp),
@@ -1183,7 +1208,7 @@ private fun EditorPanel(
             }
         }
         if (selected == null) {
-            Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 30.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1205,9 +1230,9 @@ private fun EditorPanel(
                 }
             }
         } else {
-            Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
                 Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(1.28f).clip(RoundedCornerShape(15.dp)).background(Color.Black)) {
+                    Box(Modifier.fillMaxWidth().aspectRatio(previewAspect).clip(RoundedCornerShape(12.dp)).background(Color.Black)) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize().graphicsLayer(
                                 scaleX = previewZoom * (selected?.cropZoom ?: 1f),
@@ -1274,21 +1299,12 @@ private fun EditorPanel(
                 }
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                     clips.forEachIndexed { index, clip ->
-                        Column(
-                            Modifier.width(122.dp).clip(RoundedCornerShape(15.dp))
-                                .background(if (clip.id == selectedId) Color(0xFF2B3621) else Panel)
-                                .clickable { onSelect(clip.id) }.padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("CLIP " + (index + 1), color = if (clip.id == selectedId) Lime else Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                Spacer(Modifier.weight(1f))
-                                if (clip.id == selectedId) Icon(Icons.Default.CheckCircle, null, tint = Lime, modifier = Modifier.size(14.dp))
-                            }
-                            Text(clip.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(time(clip.durationMs), color = Muted, fontSize = 10.sp)
-                            Box(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape).background(if (clip.id == selectedId) Lime else PanelAlt))
-                        }
+                        TimelineClipCard(
+                            clip = clip,
+                            index = index,
+                            selected = clip.id == selectedId,
+                            onClick = { onSelect(clip.id) }
+                        )
                     }
                     Column(
                         Modifier.width(84.dp).height(100.dp).clip(RoundedCornerShape(15.dp))
@@ -1308,7 +1324,7 @@ private fun EditorPanel(
                 }
             }
 
-            Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
                 Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Trim clip", fontWeight = FontWeight.Bold, fontSize = 17.sp)
                     Text(selected.name, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1365,7 +1381,7 @@ private fun AudioPanel(
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Sound & music", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Add a background track and control the original clip audio.", color = Muted, fontSize = 13.sp)
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.LibraryMusic, null, tint = Lime, modifier = Modifier.size(31.dp))
@@ -1396,7 +1412,7 @@ private fun AudioPanel(
                 }
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Mic, null, tint = Lime, modifier = Modifier.size(27.dp))
@@ -1444,7 +1460,7 @@ private fun AudioPanel(
             }
         }
 
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -1488,7 +1504,7 @@ private fun AudioPanel(
             }
         }
 
-        Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Mute original video audio", fontWeight = FontWeight.Bold)
@@ -1497,7 +1513,7 @@ private fun AudioPanel(
                 Switch(checked = muted, onCheckedChange = onMute)
             }
         }
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Track mixer", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 VolumeControl("Original video", sourceVolume, onSourceVolume)
@@ -1529,7 +1545,7 @@ private fun MotionPanel(
         Text("Motion & effects", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Per-clip speed, interpolated start/end keyframes, transitions and colour controls.", color = Muted, fontSize = 13.sp)
 
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("MOTION KEYFRAMES", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
                 if (selected == null) {
@@ -1697,7 +1713,7 @@ private fun MotionPanel(
             }
         }
 
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("TRANSITION TO NEXT CLIP", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                 if (selected == null) {
@@ -1721,7 +1737,7 @@ private fun MotionPanel(
             }
         }
 
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("TITLE OVERLAY", fontSize = 10.sp, color = Muted, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                 OutlinedTextField(
@@ -1786,7 +1802,7 @@ private fun CaptionsPanel(
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Captions studio", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Generate timestamped subtitles offline in English or Hindi, edit the lines, or import/export SRT.", color = Muted, fontSize = 13.sp)
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.AutoAwesome, null, tint = Lime, modifier = Modifier.size(26.dp))
@@ -2041,7 +2057,7 @@ private fun ExportPanel(
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Export video", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Render your edited timeline to an MP4 on this phone.", color = Muted, fontSize = 13.sp)
-        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+        Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Text("PROJECT SUMMARY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
                 Summary("Clips", clips.size.toString())
@@ -2182,7 +2198,7 @@ private fun LayersPanel(
         }
         Text("Timeline length: " + time(timelineDurationMs), color = Muted, fontSize = 11.sp)
         if (layers.isEmpty()) {
-            Card(shape = RoundedCornerShape(19.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
                 Column(Modifier.fillMaxWidth().padding(19.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Your overlay track is empty", fontWeight = FontWeight.Bold)
                     Text("Choose a transparent PNG logo, a sticker, or a picture. Each layer has its own in/out time, position, scale, opacity, and rotation.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
@@ -2190,7 +2206,7 @@ private fun LayersPanel(
             }
         } else {
             layers.forEachIndexed { index, layer ->
-                Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Layers, null, tint = Lime, modifier = Modifier.size(25.dp))
@@ -2300,6 +2316,103 @@ private fun LayersPanel(
 }
 
 @Composable
+private fun TimelineThumbnail(clip: Clip) {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = clip.uri, key2 = clip.startMs) {
+        value = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, clip.uri)
+                retriever.getFrameAtTime(clip.startMs.coerceAtLeast(0L) * 1_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } catch (_: Exception) {
+                null
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+    }
+    Box(
+        Modifier.fillMaxWidth().height(58.dp).clip(RoundedCornerShape(8.dp)).background(PanelAlt),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = "Video thumbnail for ${clip.name}",
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(Icons.Default.Movie, null, tint = Muted, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+@Composable
+private fun TimelineClipCard(clip: Clip, index: Int, selected: Boolean, onClick: () -> Unit) {
+    val cardBackground by animateColorAsState(
+        targetValue = if (selected) Color(0xFF263223) else Panel,
+        animationSpec = tween(160),
+        label = "timeline-card-background"
+    )
+    val lineColor by animateColorAsState(
+        targetValue = if (selected) Lime else PanelAlt,
+        animationSpec = tween(160),
+        label = "timeline-card-selection"
+    )
+    Column(
+        Modifier.width(122.dp).clip(RoundedCornerShape(12.dp)).background(cardBackground)
+            .clickable(onClick = onClick).padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("CLIP " + (index + 1), color = if (selected) Lime else Muted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            if (selected) {
+                Icon(Icons.Default.CheckCircle, null, tint = Lime, modifier = Modifier.size(13.dp))
+            }
+        }
+        TimelineThumbnail(clip)
+        Text(clip.name, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(time(clip.durationMs), color = Muted, fontSize = 10.sp)
+        Box(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape).background(lineColor))
+    }
+}
+
+@Composable
+private fun TimelineThumbnail(clip: Clip) {
+    val context = LocalContext.current
+    val bitmap by produceState<Bitmap?>(initialValue = null, key1 = clip.uri, key2 = clip.startMs) {
+        value = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, clip.uri)
+                retriever.getFrameAtTime(clip.startMs.coerceAtLeast(0L) * 1_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } catch (_: Exception) {
+                null
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+    }
+    Box(
+        Modifier.fillMaxWidth().height(58.dp).clip(RoundedCornerShape(8.dp)).background(PanelAlt),
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = "Video thumbnail for ${clip.name}",
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(Icons.Default.Movie, null, tint = Muted, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+@Composable
 private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long) {
     val active = layers.filter { timelinePositionMs >= it.startMs && timelinePositionMs < it.endMs }
     Box(Modifier.fillMaxSize()) {
@@ -2362,28 +2475,67 @@ private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long
 @Composable
 private fun NavigationBar(tab: Int, select: (Int) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 7.dp).clip(RoundedCornerShape(19.dp))
-            .background(Panel).padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+        Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp)
+            .clip(RoundedCornerShape(15.dp)).background(Panel).padding(horizontal = 4.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        NavItem("Edit", Icons.Default.Movie, tab == 0) { select(0) }
-        NavItem("Audio", Icons.Default.LibraryMusic, tab == 1) { select(1) }
-        NavItem("Motion", Icons.Default.Tune, tab == 2) { select(2) }
-        NavItem("Captions", Icons.Default.Subtitles, tab == 3) { select(3) }
-        NavItem("Layers", Icons.Default.Layers, tab == 4) { select(4) }
-        NavItem("Export", Icons.Default.Download, tab == 5) { select(5) }
+        NavItem("Edit", Icons.Default.Movie, tab == 0, Modifier.weight(1f)) { select(0) }
+        NavItem("Audio", Icons.Default.LibraryMusic, tab == 1, Modifier.weight(1f)) { select(1) }
+        NavItem("Motion", Icons.Default.Tune, tab == 2, Modifier.weight(1f)) { select(2) }
+        NavItem("Captions", Icons.Default.Subtitles, tab == 3, Modifier.weight(1f)) { select(3) }
+        NavItem("Layers", Icons.Default.Layers, tab == 4, Modifier.weight(1f)) { select(4) }
+        NavItem("Export", Icons.Default.Download, tab == 5, Modifier.weight(1f)) { select(5) }
     }
 }
 
 @Composable
-private fun NavItem(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, active: Boolean, onClick: () -> Unit) {
+private fun NavItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    active: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val itemBackground by animateColorAsState(
+        targetValue = if (active) PanelAlt else Color.Transparent,
+        animationSpec = tween(180),
+        label = "nav-background"
+    )
+    val iconColor by animateColorAsState(
+        targetValue = if (active) Lime else Muted,
+        animationSpec = tween(180),
+        label = "nav-icon"
+    )
+    val textColor by animateColorAsState(
+        targetValue = if (active) Color.White else Muted,
+        animationSpec = tween(180),
+        label = "nav-text"
+    )
+    val iconScale by animateFloatAsState(
+        targetValue = if (active) 1.04f else 1f,
+        animationSpec = tween(180),
+        label = "nav-scale"
+    )
     Column(
-        Modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 15.dp, vertical = 7.dp),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)
+        modifier.clip(RoundedCornerShape(11.dp)).background(itemBackground)
+            .clickable(onClick = onClick).padding(horizontal = 2.dp, vertical = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp)
     ) {
-        Icon(icon, contentDescription = label, tint = if (active) Lime else Muted, modifier = Modifier.size(21.dp))
-        Text(label, color = if (active) Lime else Muted, fontSize = 10.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal)
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = iconColor,
+            modifier = Modifier.size(19.dp).graphicsLayer(scaleX = iconScale, scaleY = iconScale)
+        )
+        Text(
+            label,
+            color = textColor,
+            fontSize = 9.sp,
+            maxLines = 1,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
+        )
     }
 }
 
@@ -2398,7 +2550,7 @@ private fun ActionButton(
     ) {
         Icon(icon, null, modifier = Modifier.size(14.dp))
         Spacer(Modifier.width(3.dp))
-        Text(label, fontSize = 10.sp, maxLines = 1)
+        Text(label, fontSize = 9.sp, maxLines = 1)
     }
 }
 
