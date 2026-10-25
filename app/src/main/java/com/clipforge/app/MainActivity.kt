@@ -17,6 +17,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.StatFs
 import androidx.media3.common.util.Size
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
@@ -44,6 +45,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -115,6 +117,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -152,6 +159,7 @@ import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.ProgressHolder
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
@@ -193,17 +201,25 @@ private data class Clip(
     val speedCurve: String = "Constant",
     val cropZoom: Float = 1f,
     val cropX: Float = 0f,
-    val cropY: Float = 0f
+    val cropY: Float = 0f,
+    val audioVolumeStart: Float = 1f,
+    val audioVolumeMid: Float = 1f,
+    val audioVolumeEnd: Float = 1f,
+    val audioFadeInMs: Long = 0L,
+    val audioFadeOutMs: Long = 0L
 ) {
     val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
 }
+
+private data class CaptionToken(val text: String, val startMs: Long, val endMs: Long)
 
 private data class CaptionLine(
     val id: String = UUID.randomUUID().toString(),
     val clipId: String,
     val startMs: Long,
     val endMs: Long,
-    val text: String
+    val text: String,
+    val tokens: List<CaptionToken> = emptyList()
 )
 
 private data class PhotoLayer(
@@ -242,7 +258,10 @@ private data class Project(
     val exportFrameRate: Int = 30,
     val captionStyle: String = "Classic",
     val captionPosition: String = "Bottom",
-    val captionScale: Float = 1f
+    val captionScale: Float = 1f,
+    val musicFadeInMs: Long = 0L,
+    val musicFadeOutMs: Long = 0L,
+    val duckMusicUnderVoiceover: Boolean = false
 )
 
 class MainActivity : ComponentActivity() {
@@ -312,6 +331,12 @@ private fun ClipForgeApp() {
     var autoClipSuggestions by remember { mutableStateOf<List<AutoClipSuggestion>>(emptyList()) }
     var autoClipSource by remember { mutableStateOf<Clip?>(null) }
     var autoClipBusy by remember { mutableStateOf(false) }
+    var timelineZoom by remember { mutableStateOf(1f) }
+    var snapToBeats by remember { mutableStateOf(true) }
+    var musicFadeInMs by remember { mutableStateOf(0L) }
+    var musicFadeOutMs by remember { mutableStateOf(0L) }
+    var duckMusicUnderVoiceover by remember { mutableStateOf(false) }
+    var exportProgress by remember { mutableStateOf(0) }
 
     val player = remember(context) { ExoPlayer.Builder(context).build() }
     val audioPlayer = remember(context) { ExoPlayer.Builder(context).build() }
@@ -336,7 +361,7 @@ private fun ClipForgeApp() {
         clips, music, titleText, brightness, muteVideoAudio, format,
         captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
         sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate,
-        captionStyle, captionPosition, captionScale
+        captionStyle, captionPosition, captionScale, musicFadeInMs, musicFadeOutMs, duckMusicUnderVoiceover
     )
     fun recordUndo() {
         val snapshot = currentProject()
@@ -369,6 +394,9 @@ private fun ClipForgeApp() {
         captionStyle = project.captionStyle
         captionPosition = project.captionPosition
         captionScale = project.captionScale
+        musicFadeInMs = project.musicFadeInMs
+        musicFadeOutMs = project.musicFadeOutMs
+        duckMusicUnderVoiceover = project.duckMusicUnderVoiceover
     }
     fun undoProject() {
         if (undoStack.isEmpty()) return
@@ -392,6 +420,9 @@ private fun ClipForgeApp() {
         sourceVolume = saved.sourceVolume
         musicVolume = saved.musicVolume
         voiceoverVolume = saved.voiceoverVolume
+        musicFadeInMs = saved.musicFadeInMs
+        musicFadeOutMs = saved.musicFadeOutMs
+        duckMusicUnderVoiceover = saved.duckMusicUnderVoiceover
         exportQuality = saved.exportQuality
         exportFrameRate = saved.exportFrameRate
         captionStyle = saved.captionStyle
@@ -412,13 +443,13 @@ private fun ClipForgeApp() {
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format, exportQuality, exportFrameRate, captionStyle, captionPosition, captionScale) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format, exportQuality, exportFrameRate, captionStyle, captionPosition, captionScale, musicFadeInMs, musicFadeOutMs, duckMusicUnderVoiceover) {
         if (loaded) withContext(Dispatchers.IO) {
             saveProject(context, Project(
                 clips, music, titleText, brightness, muteVideoAudio, format,
                 captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
                 sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate,
-                captionStyle, captionPosition, captionScale
+                captionStyle, captionPosition, captionScale, musicFadeInMs, musicFadeOutMs, duckMusicUnderVoiceover
             ))
         }
     }
