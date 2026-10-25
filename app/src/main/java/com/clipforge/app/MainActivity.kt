@@ -245,6 +245,7 @@ private fun ClipForgeApp() {
     var filterPreset by remember { mutableStateOf("None") }
     var captions by remember { mutableStateOf<List<CaptionLine>>(emptyList()) }
     var captioning by remember { mutableStateOf(false) }
+    var ttsGenerating by remember { mutableStateOf(false) }
     var captionLanguageId by remember { mutableStateOf("english") }
     var photoLayers by remember { mutableStateOf<List<PhotoLayer>>(emptyList()) }
     var voiceover by remember { mutableStateOf<Uri?>(null) }
@@ -654,6 +655,45 @@ private fun ClipForgeApp() {
         }
     }
 
+    fun generateCaptionNarration() {
+        if (ttsGenerating) return
+        if (captions.isEmpty()) {
+            message = "Generate or import caption lines before creating narration."
+            return
+        }
+        ttsGenerating = true
+        scope.launch {
+            try {
+                val projectCues = clips.flatMapIndexed { index, clip ->
+                    val offset = clips.take(index).sumOf { (it.durationMs / it.speed).toLong() }
+                    captions.filter { it.clipId == clip.id }.map { cue ->
+                        NarrationCue(
+                            startMs = offset + (cue.startMs / clip.speed).toLong(),
+                            endMs = offset + (cue.endMs / clip.speed).toLong(),
+                            text = cue.text
+                        )
+                    }
+                }
+                val audioFile = CaptionTtsNarrator.generate(
+                    context = context,
+                    cues = projectCues,
+                    languageId = captionLanguageId,
+                    durationMs = timelineDurationMs,
+                    onStatus = { message = it }
+                )
+                recordUndo()
+                voiceover = Uri.fromFile(audioFile)
+                voiceoverName = audioFile.name
+                message = "Created speech narration from " + projectCues.size +
+                    " subtitle lines. It is now on your voice-over track; preview the mix and export."
+            } catch (error: Exception) {
+                message = "Speech narration failed: " + (error.message ?: "check installed language voice data")
+            } finally {
+                ttsGenerating = false
+            }
+        }
+    }
+
     fun updateClip(clip: Clip) { clips = clips.map { if (it.id == clip.id) clip else it } }
 
     fun commitTrim() {
@@ -864,8 +904,10 @@ private fun ClipForgeApp() {
                 3 -> CaptionsPanel(
                     captions, clips, captioning, message,
                     captionLanguageId = captionLanguageId,
+                    ttsGenerating = ttsGenerating,
                     onLanguageChange = { captionLanguageId = it },
                     onAutoCaption = ::generateAutoCaptions,
+                    onGenerateNarration = ::generateCaptionNarration,
                     onImportSrt = { srtImportLauncher.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) },
                     onExportSrt = { srtExportLauncher.launch("ClipForge-subtitles.srt") },
                     onEdit = { id, text -> captions = captions.map { if (it.id == id) it.copy(text = text) else it } },
@@ -1436,8 +1478,10 @@ private fun CaptionsPanel(
     captioning: Boolean,
     message: String?,
     captionLanguageId: String,
+    ttsGenerating: Boolean,
     onLanguageChange: (String) -> Unit,
     onAutoCaption: () -> Unit,
+    onGenerateNarration: () -> Unit,
     onImportSrt: () -> Unit,
     onExportSrt: () -> Unit,
     onEdit: (String, String) -> Unit,
@@ -1496,6 +1540,20 @@ private fun CaptionsPanel(
                         Text("Generate captions for all clips", fontWeight = FontWeight.Bold)
                     }
                 }
+                OutlinedButton(
+                    onClick = onGenerateNarration,
+                    enabled = captions.isNotEmpty() && !ttsGenerating,
+                    modifier = Modifier.fillMaxWidth().height(49.dp),
+                    shape = RoundedCornerShape(13.dp)
+                ) {
+                    Icon(Icons.Default.Mic, null)
+                    Spacer(Modifier.width(7.dp))
+                    Text(if (ttsGenerating) "Creating spoken narration…" else "Generate speech from captions")
+                }
+                Text(
+                    "Uses Android's installed speech engine for the selected caption language. If the device has no voice data for that language, install it in Text-to-Speech settings first.",
+                    color = Muted, fontSize = 11.sp, lineHeight = 16.sp
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onImportSrt, modifier = Modifier.weight(1f), shape = RoundedCornerShape(13.dp)) {
                         Icon(Icons.Default.Add, null)
