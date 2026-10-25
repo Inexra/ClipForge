@@ -1,44 +1,49 @@
 # ClipForge
 
-ClipForge is a native Android video editor built with Kotlin, Jetpack Compose, ExoPlayer, and Media3 Transformer. It is designed for phone-first editing, with local project saving and on-device rendering.
+ClipForge is a native Android video editor built with Kotlin, Jetpack Compose, ExoPlayer, and Media3 Transformer. Editing runs on the phone; the project workspace autosaves locally, and APKs are built by GitHub Actions without Android Studio.
 
-## Editing features
+## Implemented editor workflows
 
-- Import multiple video clips with Android's document picker.
-- Preview and scrub clips; trim start and end points; split, delete, and reorder clips.
-- Per-clip playback speed (0.5×–3×).
-- Per-clip start/end motion keyframes for zoom and rotation, interpolated in the exported render.
-- Transition presets (Cut, Fade, Flash, Zoom). Fade/flash/zoom are cut-safe edge effects; they are **not** overlapping cross-dissolves.
-- Background music selection and preview; looping background track; option to mute original clip sound.
-- Title overlay, brightness, saturation, and colour presets (Warm, Cinematic, Mono, Invert).
-- Timestamped subtitle lines shown during the matching intervals and burned into the exported video.
-- Automatic English speech captions using Vosk speech recognition on-device.
-- Import and export SRT subtitle files; edit and delete individual caption lines.
-- MP4 export (H.264/AAC) with Original, 9:16 Shorts, 16:9 Video, and 1:1 Square canvas presets.
-- Save rendered videos to Gallery/Movies/ClipForge and share them.
-- Project settings and timeline autosave locally.
+- Import multiple video clips; preview and scrub; trim, split, reorder, and delete clips.
+- Undo/redo history for common timeline edits.
+- Per-clip speed presets and speed curves (constant, ramp up/down, ease-in/out, pulse).
+- Start/end zoom and rotation keyframes, crop/reframe zoom, and horizontal/vertical crop positioning.
+- Cut, Fade, Flash, and Zoom transition presets. Fade/flash/zoom are cut-safe edge effects, **not overlapping cross-dissolves**.
+- Image/logo overlay layers with independent in/out timing, position, size, opacity, and rotation.
+- Freeze-frame capture as a timed full-frame layer.
+- Background music, recorded voice-over, independently adjustable source/music/voice-over levels, and original-audio mute.
+- Manual beat markers and automatic audio-energy peak detection.
+- Static title overlay; brightness, saturation, and Warm/Cinematic/Mono/Invert colour presets.
+- Timestamped, editable subtitles burned into the output.
+- Automatic on-device English and Hindi speech captions using the corresponding Vosk model.
+- Text-to-speech narration generated from caption lines using the phone's installed Android TTS voice data.
+- SRT subtitle import/export.
+- Portable project bundle export/import: ZIP containing project settings and copied source media.
+- MP4 H.264/AAC export with Original, 9:16 Shorts, 9:16 Full HD, 16:9 Video, 16:9 Full HD, and 1:1 Square presets.
+- Save renders into Gallery/Movies/ClipForge and share them.
 
-## Automatic captions and privacy
+## Captions, speech and privacy
 
-The first auto-caption run needs an internet connection to download the small English Vosk speech model (roughly 40 MB). After that, recognition runs locally on the phone; the video/audio is not sent to a cloud transcription service. The current included model is **English-only**, and transcription accuracy depends on speech clarity, noise, accent, and available audio tracks. Always review captions before publishing.
+The first automatic-caption run for each language needs an internet connection to download its small speech model (roughly 40–45 MB). Speech recognition then runs locally, and the source audio/video is not uploaded to a caption service. The included models are English and Hindi only. Speech-to-text quality varies with accent, noise, source codecs, and audio quality; review all generated subtitles.
 
-## Build or install without Android Studio
+Text-to-speech uses the Android speech engine installed on the phone, not a guaranteed cloud voice. If the selected language's voice data isn't available, install it in the phone's Text-to-Speech settings.
+
+## Get an APK without Android Studio
 
 1. Open the **Actions** tab in this repository.
 2. Open the latest **Android APK** workflow run.
-3. After it succeeds, download the **ClipForge-debug-apk** artifact.
-4. Extract the ZIP and install `app-debug.apk` on your Android phone. Android may ask you to allow installs from your browser or file manager.
+3. Download the **ClipForge-debug-apk** artifact after the run succeeds.
+4. Extract the ZIP and install `app-debug.apk` on your Android phone. You may need to allow installations from your browser or file manager.
 
-Every push to `main` triggers a cloud build. No API keys or paid backend are required for the listed editing features.
+Every push to `main` triggers a cloud build. No paid backend or provider API key is needed for the current feature set.
 
-## Build stack
+## Stack
 
-- Kotlin 2.2.0 / Jetpack Compose
-- Android Gradle Plugin 8.10.1
-- JDK 17, Android SDK 36, minSdk 26
-- Jetpack Media3 1.11.1
-- Vosk Android speech recognition model (downloaded on first use)
+- Kotlin 2.2.0, Jetpack Compose, Android Gradle Plugin 8.10.1
+- JDK 17, Android SDK 36, minimum SDK 26
+- Jetpack Media3 1.11.1 for playback and video composition
+- Vosk Android for offline speech recognition after the initial model download
 
-## Current limitations
+## Important limitations
 
-ClipForge is a more capable editing MVP, but it is **not yet a feature-for-feature replacement for CapCut or VN**. Current limitations include no true overlapping cross-dissolve, no multiple simultaneous independent audio tracks or adjustable per-track volume automation, no multi-point Bézier keyframe curves, no background-removal/AI video generation, no automatic multilingual cloud captioning, no template marketplace, and no direct social publishing. Rendering speed and supported input formats depend on the phone's supported media codecs, thermal state, and free storage. The cloud CI build is not a substitute for real-device testing.
+ClipForge is a substantially expanded editing MVP, **not yet a complete feature-for-feature CapCut/VN replacement**. It still lacks true overlapping cross-dissolves, multi-point Bézier keyframe graphs for every property, optical-flow/frame-interpolated slow motion, reverse playback export, chroma key and AI subject/background removal, animated text/sticker libraries, full multi-track video compositing with independently edited video-overlay timelines, imported LUT pipeline, silence/filler-word removal, auto-template/AutoCut library, AI image/video generation, cloud collaboration/sync, and direct social-platform account publishing. Auto beat detection is a signal-energy heuristic that should be reviewed, not a guaranteed musical beat grid. Supported codecs and render speed depend on the phone's hardware decoder/encoder, temperature, and free storage. Passing cloud CI does not replace testing actual media on the target phone.
