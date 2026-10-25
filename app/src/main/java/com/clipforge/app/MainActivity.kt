@@ -162,7 +162,8 @@ private data class Clip(
     val zoomEnd: Float = 1f,
     val rotationStart: Float = 0f,
     val rotationEnd: Float = 0f,
-    val transition: String = "Cut"
+    val transition: String = "Cut",
+    val speedCurve: String = "Constant"
 ) {
     val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
 }
@@ -1190,6 +1191,21 @@ private fun MotionPanel(
                             }
                         }
                     }
+                    Text("Speed curve", color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse").forEach { curve ->
+                            val active = selected.speedCurve == curve
+                            Surface(
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onClipChange(selected.copy(speedCurve = curve)) },
+                                color = if (active) Lime else PanelAlt,
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text(curve, modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                    color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    Text("Curves are rendered from short time slices and can take longer to export.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
 
                     HorizontalDivider(color = PanelAlt)
                     Text("START KEYFRAME  •  FRAME 0", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
@@ -1802,17 +1818,24 @@ private fun buildEditedItems(
             }
         }
         val points = boundaries.toList()
-        val speedProvider = object : SpeedProvider {
-            override fun getSpeed(timeUs: Long): Float = clip.speed
-            override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
-        }
-
         for (pointIndex in 0 until points.lastIndex) {
             val relativeStart = points[pointIndex]
             val relativeEnd = points[pointIndex + 1]
             if (relativeEnd <= relativeStart) continue
             val mid = (relativeStart + relativeEnd) / 2f
             val fraction = (mid / duration.toFloat()).coerceIn(0f, 1f)
+            val speedFactor = when (clip.speedCurve) {
+                "Ramp up" -> 0.5f + 1.5f * fraction
+                "Ramp down" -> 2.0f - 1.5f * fraction
+                "Ease in/out" -> 0.5f + 1.5f * kotlin.math.sin(Math.PI.toFloat() * fraction)
+                "Pulse" -> (1.0f + 0.65f * kotlin.math.sin(fraction * (Math.PI.toFloat() * 4f))).coerceAtLeast(0.25f)
+                else -> 1f
+            }
+            val segmentSpeed = (clip.speed * speedFactor).coerceIn(0.25f, 3f)
+            val speedProvider = object : SpeedProvider {
+                override fun getSpeed(timeUs: Long): Float = segmentSpeed
+                override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
+            }
             val keyZoom = clip.zoomStart + (clip.zoomEnd - clip.zoomStart) * fraction
             val keyRotation = clip.rotationStart + (clip.rotationEnd - clip.rotationStart) * fraction
             val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
@@ -2018,7 +2041,8 @@ private fun loadProject(context: Context): Project {
                     zoomEnd = o.optDouble("zoomEnd", 1.0).toFloat().coerceIn(1f, 1.8f),
                     rotationStart = o.optDouble("rotationStart", 0.0).toFloat().coerceIn(-180f, 180f),
                     rotationEnd = o.optDouble("rotationEnd", 0.0).toFloat().coerceIn(-180f, 180f),
-                    transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut"
+                    transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut",
+                    speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant"
                 ))
             }
         }
@@ -2100,6 +2124,7 @@ private fun saveProject(context: Context, project: Project) {
             put("rotationStart", clip.rotationStart)
             put("rotationEnd", clip.rotationEnd)
             put("transition", clip.transition)
+            put("speedCurve", clip.speedCurve)
         })
     }
     val subtitleArray = JSONArray()
