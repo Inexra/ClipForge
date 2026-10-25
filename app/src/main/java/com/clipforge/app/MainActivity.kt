@@ -5,6 +5,8 @@ package com.clipforge.app
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -22,6 +24,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -52,6 +55,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -79,6 +83,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -87,6 +93,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -100,6 +107,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.audio.SpeedProvider
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.Brightness
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.HslAdjustment
 import androidx.media3.effect.RgbFilter
 import androidx.media3.effect.ScaleAndRotateTransformation
@@ -162,6 +170,18 @@ private data class CaptionLine(
     val text: String
 )
 
+private data class PhotoLayer(
+    val id: String = UUID.randomUUID().toString(),
+    val uri: Uri,
+    val name: String,
+    val startMs: Long = 0L,
+    val endMs: Long = 5_000L,
+    val position: String = "bottom-right",
+    val scale: Float = 0.30f,
+    val opacity: Float = 1f,
+    val rotation: Float = 0f
+)
+
 private data class Project(
     val clips: List<Clip>,
     val music: Uri?,
@@ -171,7 +191,10 @@ private data class Project(
     val format: String,
     val captions: List<CaptionLine>,
     val saturation: Float,
-    val filterPreset: String
+    val filterPreset: String,
+    val photoLayers: List<PhotoLayer> = emptyList(),
+    val voiceover: Uri? = null,
+    val beatMarkers: List<Long> = emptyList()
 )
 
 class MainActivity : ComponentActivity() {
@@ -205,6 +228,10 @@ private fun ClipForgeApp() {
     var filterPreset by remember { mutableStateOf("None") }
     var captions by remember { mutableStateOf<List<CaptionLine>>(emptyList()) }
     var captioning by remember { mutableStateOf(false) }
+    var photoLayers by remember { mutableStateOf<List<PhotoLayer>>(emptyList()) }
+    var voiceover by remember { mutableStateOf<Uri?>(null) }
+    var voiceoverName by remember { mutableStateOf<String?>(null) }
+    var beatMarkers by remember { mutableStateOf<List<Long>>(emptyList()) }
     var muteVideoAudio by remember { mutableStateOf(false) }
     var format by remember { mutableStateOf("Original") }
     var tab by remember { mutableStateOf(0) }
@@ -238,14 +265,21 @@ private fun ClipForgeApp() {
         saturation = saved.saturation
         filterPreset = saved.filterPreset
         captions = saved.captions
+        photoLayers = saved.photoLayers
+        voiceover = saved.voiceover
+        voiceoverName = saved.voiceover?.let { nameForUri(context, it) }
+        beatMarkers = saved.beatMarkers
         muteVideoAudio = saved.muteVideoAudio
         format = saved.format
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, muteVideoAudio, format) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, muteVideoAudio, format) {
         if (loaded) withContext(Dispatchers.IO) {
-            saveProject(context, Project(clips, music, titleText, brightness, muteVideoAudio, format, captions, saturation, filterPreset))
+            saveProject(context, Project(
+                clips, music, titleText, brightness, muteVideoAudio, format,
+                captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers
+            ))
         }
     }
 
@@ -365,8 +399,27 @@ private fun ClipForgeApp() {
         }
     }
 
+    val photoLayerPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            }
+            scope.launch {
+                val totalDuration = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L)
+                val additions = withContext(Dispatchers.IO) {
+                    uris.map { uri ->
+                        PhotoLayer(uri = uri, name = nameForUri(context, uri), startMs = 0L, endMs = totalDuration)
+                    }
+                }
+                photoLayers = photoLayers + additions
+                message = "Added " + additions.size + " image layer(s). Adjust their timing and position in Layers."
+            }
+        }
+    }
+
     fun importVideos() { videoPicker.launch(arrayOf("video/*")) }
     fun importMusic() { musicPicker.launch(arrayOf("audio/*")) }
+    fun importPhotoLayers() { photoLayerPicker.launch(arrayOf("image/*")) }
 
     fun generateAutoCaptions() {
         if (captioning || clips.isEmpty()) {
@@ -452,7 +505,7 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = buildEditedItems(context, clips, captions, titleText, brightness, saturation, filterPreset, format)
+            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format)
 
             val mainSequence = if (muteVideoAudio) {
                 EditedMediaItemSequence.withVideoFrom(editItems)
@@ -524,7 +577,7 @@ private fun ClipForgeApp() {
             AppHeader(clips.size)
             when (tab) {
                 0 -> EditorPanel(
-                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, message,
+                    clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, message,
                     onImport = ::importVideos,
                     onSelect = { selectedId = it },
                     onSeek = { positionMs -> player.seekTo(positionMs); position = positionMs },
@@ -567,6 +620,14 @@ private fun ClipForgeApp() {
                     onEdit = { id, text -> captions = captions.map { if (it.id == id) it.copy(text = text) else it } },
                     onDelete = { id -> captions = captions.filterNot { it.id == id } }
                 )
+                4 -> LayersPanel(
+                    layers = photoLayers,
+                    timelineDurationMs = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L),
+                    message = message,
+                    onAdd = ::importPhotoLayers,
+                    onUpdate = { layer -> photoLayers = photoLayers.map { if (it.id == layer.id) layer else it } },
+                    onDelete = { id -> photoLayers = photoLayers.filterNot { it.id == id } }
+                )
                 else -> ExportPanel(
                     clips, musicName, titleText, brightness, format, exporting, outputUri != null, message,
                     onFormat = { format = it },
@@ -600,7 +661,8 @@ private fun AppHeader(count: Int) {
 @Composable
 private fun EditorPanel(
     clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, player: ExoPlayer,
-    position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>, message: String?,
+    position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
+    photoLayers: List<PhotoLayer>, message: String?,
     onImport: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
@@ -674,6 +736,9 @@ private fun EditorPanel(
                                     .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.80f))
                                     .padding(horizontal = 10.dp, vertical = 6.dp))
                         }
+                        val totalBeforeSelected = clips.take(selectedIndex.coerceAtLeast(0)).sumOf { (it.durationMs / it.speed).toLong() }
+                        val globalPreviewPosition = totalBeforeSelected + if (selected != null) (position / selected.speed).toLong() else 0L
+                        PhotoLayerPreview(photoLayers, globalPreviewPosition)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onPlay) {
@@ -1153,6 +1218,160 @@ private fun Summary(label: String, value: String) {
     }
 }
 
+private fun layerAnchors(position: String): Pair<Float, Float> = when (position) {
+    "top-left" -> -0.62f to 0.62f
+    "top-right" -> 0.62f to 0.62f
+    "center" -> 0f to 0f
+    "bottom-left" -> -0.62f to -0.62f
+    else -> 0.62f to -0.62f
+}
+
+@Composable
+private fun LayersPanel(
+    layers: List<PhotoLayer>,
+    timelineDurationMs: Long,
+    message: String?,
+    onAdd: () -> Unit,
+    onUpdate: (PhotoLayer) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
+        Text("Layers & overlays", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        Text("Add image, logo, sticker, or watermark layers on top of your video timeline.", color = Muted, fontSize = 13.sp)
+        Button(
+            onClick = onAdd,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            shape = RoundedCornerShape(15.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Bg)
+        ) {
+            Icon(Icons.Default.Add, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Add images / logos", fontWeight = FontWeight.Bold)
+        }
+        Text("Timeline length: " + time(timelineDurationMs), color = Muted, fontSize = 11.sp)
+        if (layers.isEmpty()) {
+            Card(shape = RoundedCornerShape(19.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+                Column(Modifier.fillMaxWidth().padding(19.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Your overlay track is empty", fontWeight = FontWeight.Bold)
+                    Text("Choose a transparent PNG logo, a sticker, or a picture. Each layer has its own in/out time, position, scale, opacity, and rotation.", color = Muted, fontSize = 12.sp, lineHeight = 17.sp)
+                }
+            }
+        } else {
+            layers.forEachIndexed { index, layer ->
+                Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Layers, null, tint = Lime, modifier = Modifier.size(25.dp))
+                            Spacer(Modifier.width(9.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("OVERLAY " + (index + 1), color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
+                                Text(layer.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Remove overlay",
+                                tint = Color(0xFFFF8D8D),
+                                modifier = Modifier.size(20.dp).clickable { onDelete(layer.id) }
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("IN", color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text(time(layer.startMs), color = Lime, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                        Slider(
+                            value = layer.startMs.toFloat().coerceIn(0f, timelineDurationMs.toFloat()),
+                            onValueChange = { value ->
+                                onUpdate(layer.copy(startMs = value.toLong().coerceIn(0L, (layer.endMs - 100L).coerceAtLeast(0L))))
+                            },
+                            valueRange = 0f..timelineDurationMs.toFloat().coerceAtLeast(1_000f)
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("OUT", color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text(time(layer.endMs), color = Lime, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                        Slider(
+                            value = layer.endMs.toFloat().coerceIn(0f, timelineDurationMs.toFloat()),
+                            onValueChange = { value ->
+                                onUpdate(layer.copy(endMs = value.toLong().coerceIn((layer.startMs + 100L).coerceAtMost(timelineDurationMs), timelineDurationMs)))
+                            },
+                            valueRange = 0f..timelineDurationMs.toFloat().coerceAtLeast(1_000f)
+                        )
+                        Text("POSITION", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf("top-left", "top-right", "center", "bottom-left", "bottom-right").forEach { preset ->
+                                val active = layer.position == preset
+                                Surface(
+                                    modifier = Modifier.clip(RoundedCornerShape(9.dp)).clickable { onUpdate(layer.copy(position = preset)) },
+                                    color = if (active) Lime else PanelAlt,
+                                    shape = RoundedCornerShape(9.dp)
+                                ) {
+                                    Text(preset.replace("-", " "), modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+                                        color = if (active) Bg else Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Size", color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text((layer.scale * 100).toInt().toString() + "%", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Slider(value = layer.scale, onValueChange = { onUpdate(layer.copy(scale = it)) }, valueRange = 0.12f..0.70f)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Opacity", color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text((layer.opacity * 100).toInt().toString() + "%", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Slider(value = layer.opacity, onValueChange = { onUpdate(layer.copy(opacity = it)) }, valueRange = 0f..1f)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Rotation", color = Muted, fontSize = 11.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text(layer.rotation.toInt().toString() + "°", color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Slider(value = layer.rotation, onValueChange = { onUpdate(layer.copy(rotation = it)) }, valueRange = -180f..180f)
+                    }
+                }
+            }
+        }
+        if (message != null) MessageStrip(message)
+    }
+}
+
+@Composable
+private fun PhotoLayerPreview(layers: List<PhotoLayer>, timelinePositionMs: Long) {
+    val active = layers.filter { timelinePositionMs >= it.startMs && timelinePositionMs < it.endMs }
+    Box(Modifier.fillMaxSize()) {
+        active.forEach { layer ->
+            val context = LocalContext.current
+            val bitmap by produceState<Bitmap?>(initialValue = null, key1 = layer.uri) {
+                value = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(layer.uri)?.use { BitmapFactory.decodeStream(it) }
+                    }.getOrNull()
+                }
+            }
+            if (bitmap != null) {
+                val alignment = when (layer.position) {
+                    "top-left" -> Alignment.TopStart
+                    "top-right" -> Alignment.TopEnd
+                    "center" -> Alignment.Center
+                    "bottom-left" -> Alignment.BottomStart
+                    else -> Alignment.BottomEnd
+                }
+                Image(
+                    bitmap = bitmap!!.asImageBitmap(),
+                    contentDescription = layer.name,
+                    alpha = layer.opacity.coerceIn(0f, 1f),
+                    modifier = Modifier.align(alignment).padding(8.dp)
+                        .size((230f * layer.scale).dp)
+                        .graphicsLayer(rotationZ = layer.rotation)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun NavigationBar(tab: Int, select: (Int) -> Unit) {
     Row(
@@ -1165,7 +1384,8 @@ private fun NavigationBar(tab: Int, select: (Int) -> Unit) {
         NavItem("Audio", Icons.Default.LibraryMusic, tab == 1) { select(1) }
         NavItem("Motion", Icons.Default.Tune, tab == 2) { select(2) }
         NavItem("Captions", Icons.Default.Subtitles, tab == 3) { select(3) }
-        NavItem("Export", Icons.Default.Download, tab == 4) { select(4) }
+        NavItem("Layers", Icons.Default.Layers, tab == 4) { select(4) }
+        NavItem("Export", Icons.Default.Download, tab == 5) { select(5) }
     }
 }
 
@@ -1248,6 +1468,7 @@ private fun buildEditedItems(
     context: Context,
     clips: List<Clip>,
     captions: List<CaptionLine>,
+    photoLayers: List<PhotoLayer>,
     titleText: String,
     brightness: Float,
     saturation: Float,
@@ -1257,7 +1478,10 @@ private fun buildEditedItems(
     val result = mutableListOf<EditedMediaItem>()
     clips.forEachIndexed { clipIndex, clip ->
         val duration = clip.durationMs.coerceAtLeast(1L)
+        val projectOffsetMs = clips.take(clipIndex).sumOf { (it.durationMs / it.speed).toLong() }
+        val projectClipEndMs = projectOffsetMs + (duration / clip.speed).toLong()
         val activeCaptions = captions.filter { it.clipId == clip.id && it.endMs > 0L && it.startMs < duration }
+        val activePhotoLayers = photoLayers.filter { it.endMs > projectOffsetMs && it.startMs < projectClipEndMs }
         val transitionIn = clips.getOrNull(clipIndex - 1)?.transition ?: "Cut"
         val transitionOut = if (clipIndex < clips.lastIndex) clip.transition else "Cut"
         val transitionLength = minOf(400L, (duration / 3L).coerceAtLeast(0L))
@@ -1268,6 +1492,12 @@ private fun buildEditedItems(
         activeCaptions.forEach { caption ->
             boundaries.add(caption.startMs.coerceIn(0L, duration))
             boundaries.add(caption.endMs.coerceIn(0L, duration))
+        }
+        activePhotoLayers.forEach { layer ->
+            val layerStartInSource = ((layer.startMs - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong()
+            val layerEndInSource = ((layer.endMs - projectOffsetMs).coerceAtLeast(0L) * clip.speed).toLong()
+            boundaries.add(layerStartInSource.coerceIn(0L, duration))
+            boundaries.add(layerEndInSource.coerceIn(0L, duration))
         }
         if (transitionLength > 0L) {
             for (step in 1..5) {
@@ -1333,6 +1563,18 @@ private fun buildEditedItems(
             }
 
             val overlays = mutableListOf<androidx.media3.effect.TextureOverlay>()
+            val projectMidpointMs = projectOffsetMs + (mid / clip.speed).toLong()
+            activePhotoLayers.filter { projectMidpointMs >= it.startMs && projectMidpointMs < it.endMs }.forEach { layer ->
+                val (anchorX, anchorY) = layerAnchors(layer.position)
+                val layerSettings = StaticOverlaySettings.Builder()
+                    .setBackgroundFrameAnchor(anchorX, anchorY)
+                    .setOverlayFrameAnchor(0f, 0f)
+                    .setScale(layer.scale.coerceIn(0.12f, 0.7f), layer.scale.coerceIn(0.12f, 0.7f))
+                    .setAlphaScale(layer.opacity.coerceIn(0f, 1f))
+                    .setRotationDegrees(layer.rotation.coerceIn(-180f, 180f))
+                    .build()
+                overlays.add(BitmapOverlay.createStaticBitmapOverlay(context, layer.uri, layerSettings))
+            }
             if (titleText.isNotBlank()) {
                 val styledTitle = SpannableString(titleText.trim()).apply {
                     setSpan(ForegroundColorSpan(AndroidColor.WHITE), 0, length, 0)
@@ -1506,6 +1748,31 @@ private fun loadProject(context: Context): Project {
             }
         }
     }
+    val layerList = mutableListOf<PhotoLayer>()
+    runCatching {
+        val array = JSONArray(p.getString("photoLayers", "[]") ?: "[]")
+        for (i in 0 until array.length()) {
+            val item = array.getJSONObject(i)
+            val start = item.optLong("start", 0L)
+            val end = item.optLong("end", 5_000L)
+            if (end > start) layerList.add(PhotoLayer(
+                id = item.optString("id", UUID.randomUUID().toString()),
+                uri = Uri.parse(item.getString("uri")),
+                name = item.optString("name", "Image layer"),
+                startMs = start,
+                endMs = end,
+                position = item.optString("position", "bottom-right").takeIf { it in listOf("top-left", "top-right", "center", "bottom-left", "bottom-right") } ?: "bottom-right",
+                scale = item.optDouble("scale", 0.30).toFloat().coerceIn(0.12f, 0.7f),
+                opacity = item.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+                rotation = item.optDouble("rotation", 0.0).toFloat().coerceIn(-180f, 180f)
+            ))
+        }
+    }
+    val markers = mutableListOf<Long>()
+    runCatching {
+        val markerArray = JSONArray(p.getString("beatMarkers", "[]") ?: "[]")
+        for (i in 0 until markerArray.length()) markers.add(markerArray.optLong(i).coerceAtLeast(0L))
+    }
     return Project(
         clips = clips,
         music = p.getString("music", null)?.let { Uri.parse(it) },
@@ -1515,7 +1782,10 @@ private fun loadProject(context: Context): Project {
         format = p.getString("format", "Original") ?: "Original",
         captions = captionList,
         saturation = p.getFloat("saturation", 0f).coerceIn(-100f, 100f),
-        filterPreset = p.getString("filterPreset", "None") ?: "None"
+        filterPreset = p.getString("filterPreset", "None") ?: "None",
+        photoLayers = layerList,
+        voiceover = p.getString("voiceover", null)?.let { Uri.parse(it) },
+        beatMarkers = markers.sorted()
     )
 }
 
@@ -1547,9 +1817,28 @@ private fun saveProject(context: Context, project: Project) {
             put("text", caption.text)
         })
     }
+    val layerArray = JSONArray()
+    project.photoLayers.forEach { layer ->
+        layerArray.put(JSONObject().apply {
+            put("id", layer.id)
+            put("uri", layer.uri.toString())
+            put("name", layer.name)
+            put("start", layer.startMs)
+            put("end", layer.endMs)
+            put("position", layer.position)
+            put("scale", layer.scale)
+            put("opacity", layer.opacity)
+            put("rotation", layer.rotation)
+        })
+    }
+    val markerArray = JSONArray()
+    project.beatMarkers.forEach { markerArray.put(it) }
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
         .putString("clips", array.toString())
         .putString("captions", subtitleArray.toString())
+        .putString("photoLayers", layerArray.toString())
+        .putString("voiceover", project.voiceover?.toString())
+        .putString("beatMarkers", markerArray.toString())
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
