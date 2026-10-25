@@ -34,6 +34,8 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -1297,8 +1299,12 @@ private fun EditorPanel(
                     Spacer(Modifier.weight(1f))
                     Text(clips.size.toString() + " clips · " + time(clips.sumOf { it.durationMs }), color = Lime, fontSize = 11.sp)
                 }
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                    clips.forEachIndexed { index, clip ->
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(end = 4.dp)
+                ) {
+                    itemsIndexed(clips, key = { _, clip -> clip.id }) { index, clip ->
                         TimelineClipCard(
                             clip = clip,
                             index = index,
@@ -1306,13 +1312,16 @@ private fun EditorPanel(
                             onClick = { onSelect(clip.id) }
                         )
                     }
-                    Column(
-                        Modifier.width(84.dp).height(100.dp).clip(RoundedCornerShape(15.dp))
-                            .background(Panel).clickable(onClick = onAdd).padding(10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(Icons.Default.Add, null, tint = Lime)
-                        Text("Add clip", color = Muted, fontSize = 10.sp)
+                    item(key = "add-clip") {
+                        Column(
+                            Modifier.width(84.dp).height(100.dp).clip(RoundedCornerShape(12.dp))
+                                .background(Panel).clickable(onClick = onAdd).padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Add, null, tint = Lime)
+                            Text("Add clip", color = Muted, fontSize = 10.sp)
+                        }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -2330,6 +2339,10 @@ private fun TimelineThumbnail(clip: Clip) {
                 runCatching { retriever.release() }
             }
         }
+    }
+    DisposableEffect(bitmap) {
+        val frame = bitmap
+        onDispose { runCatching { frame?.recycle() } }
     }
     Box(
         Modifier.fillMaxWidth().height(58.dp).clip(RoundedCornerShape(8.dp)).background(PanelAlt),
