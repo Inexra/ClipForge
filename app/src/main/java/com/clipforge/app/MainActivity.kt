@@ -1119,7 +1119,19 @@ private fun ClipForgeApp() {
                                         .build()
                                 )
                             }
-                            audioItems.addAll(buildEditedAudioItems(context, clip, sourceVolume))
+                            val crossfadeIn = if (index > 0 && clips[index - 1].transition == "Crossfade") {
+                                crossfadeDurationMs(clips[index - 1], clip)
+                            } else 0L
+                            val crossfadeOut = if (index < clips.lastIndex && clip.transition == "Crossfade") {
+                                crossfadeDurationMs(clip, clips[index + 1])
+                            } else 0L
+                            audioItems.addAll(
+                                buildEditedAudioItems(
+                                    context, clip, sourceVolume,
+                                    fadeInOverrideMs = crossfadeIn,
+                                    fadeOutOverrideMs = crossfadeOut
+                                )
+                            )
                             if (audioItems.isNotEmpty()) sequenceList.add(EditedMediaItemSequence.withAudioFrom(audioItems))
                         }
                     }
@@ -3737,14 +3749,18 @@ private fun silenceWavUri(context: Context, durationMs: Long): Uri {
 private fun buildEditedAudioItems(
     context: Context,
     clip: Clip,
-    sourceVolume: Float
+    sourceVolume: Float,
+    fadeInOverrideMs: Long = 0L,
+    fadeOutOverrideMs: Long = 0L
 ): List<EditedMediaItem> {
     val result = mutableListOf<EditedMediaItem>()
     val duration = clip.durationMs.coerceAtLeast(1L)
+    val fadeInTotalMs = max(clip.audioFadeInMs, fadeInOverrideMs)
+    val fadeOutTotalMs = max(clip.audioFadeOutMs, fadeOutOverrideMs)
     val boundaries = sortedSetOf(0L, duration)
     for (step in 1..12) boundaries.add(duration * step / 13L)
-    boundaries.add((clip.audioFadeInMs * clip.speed).toLong().coerceIn(0L, duration))
-    boundaries.add((duration - (clip.audioFadeOutMs * clip.speed).toLong()).coerceIn(0L, duration))
+    boundaries.add((fadeInTotalMs * clip.speed).toLong().coerceIn(0L, duration))
+    boundaries.add((duration - (fadeOutTotalMs * clip.speed).toLong()).coerceIn(0L, duration))
     boundaries.add(duration / 3L)
     boundaries.add(duration * 2L / 3L)
     val points = boundaries.toList()
@@ -3771,7 +3787,9 @@ private fun buildEditedAudioItems(
             .setEndPositionMs(clip.startMs + relativeEnd)
             .build()
         val item = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
-        val gain = GainProcessor(DefaultGainProvider.Builder(clipAudioGain(clip, sourceVolume, fraction, mid, duration)).build())
+        val gain = GainProcessor(DefaultGainProvider.Builder(
+            clipAudioGain(clip, sourceVolume, fraction, mid, duration, fadeInTotalMs, fadeOutTotalMs)
+        ).build())
         result.add(
             EditedMediaItem.Builder(item)
                 .setRemoveVideo(true)
@@ -3784,14 +3802,22 @@ private fun buildEditedAudioItems(
 }
 
 
-private fun clipAudioGain(clip: Clip, baseVolume: Float, fraction: Float, sourceMidMs: Float, sourceDurationMs: Long): Float {
+private fun clipAudioGain(
+    clip: Clip,
+    baseVolume: Float,
+    fraction: Float,
+    sourceMidMs: Float,
+    sourceDurationMs: Long,
+    fadeInOverrideMs: Long = 0L,
+    fadeOutOverrideMs: Long = 0L
+): Float {
     val keyVolume = interpolateThree(
         clip.audioVolumeStart, clip.audioVolumeMid, clip.audioVolumeEnd, fraction, clip.motionCurve
     ).coerceIn(0f, 1f)
     val timelineMidMs = (sourceMidMs / clip.speed.coerceAtLeast(0.25f)).toLong().coerceAtLeast(0L)
     val renderedDuration = renderedDurationEstimateMs(clip).coerceAtLeast(1L)
-    val fadeIn = clip.audioFadeInMs.coerceIn(0L, renderedDuration)
-    val fadeOut = clip.audioFadeOutMs.coerceIn(0L, renderedDuration)
+    val fadeIn = max(clip.audioFadeInMs, fadeInOverrideMs).coerceIn(0L, renderedDuration)
+    val fadeOut = max(clip.audioFadeOutMs, fadeOutOverrideMs).coerceIn(0L, renderedDuration)
     val fadeInGain = if (fadeIn > 0L) (timelineMidMs.toFloat() / fadeIn.toFloat()).coerceIn(0f, 1f) else 1f
     val fadeOutGain = if (fadeOut > 0L) ((renderedDuration - timelineMidMs).toFloat() / fadeOut.toFloat()).coerceIn(0f, 1f) else 1f
     return (baseVolume.coerceIn(0f, 1f) * keyVolume * fadeInGain * fadeOutGain).coerceIn(0f, 1f)
