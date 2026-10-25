@@ -18,6 +18,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.util.Size
+import java.nio.ByteOrder
+import java.util.concurrent.TimeUnit
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.SpannableString
@@ -25,6 +27,10 @@ import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.graphics.Color as AndroidColor
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.segmentation.Segmentation
+import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -728,6 +734,26 @@ private fun ClipForgeApp() {
         message = "Text sticker added. Edit its wording, style and timing in Layers."
     }
 
+    fun removeImageBackground(layer: PhotoLayer) {
+        if (layer.textContent != null || layer.fullFrame) {
+            message = "Select a regular image/photo layer for person cutout."
+            return
+        }
+        scope.launch {
+            message = "Detecting the person and creating a transparent cutout…"
+            try {
+                val cutoutUri = withContext(Dispatchers.IO) { createPersonCutout(context, layer.uri) }
+                recordUndo()
+                photoLayers = photoLayers.map { current ->
+                    if (current.id == layer.id) current.copy(uri = cutoutUri, name = current.name + " · Cutout") else current
+                }
+                message = "Person cutout created as a transparent PNG. Review its edges in the preview."
+            } catch (error: Exception) {
+                message = "Cutout failed: " + (error.message ?: "no clear person found; try a sharper portrait")
+            }
+        }
+    }
+
     fun generateAutoCaptions() {
         if (captioning || clips.isEmpty()) {
             if (clips.isEmpty()) message = "Import a video before generating captions."
@@ -1140,12 +1166,13 @@ private fun ClipForgeApp() {
                 )
                 4 -> LayersPanel(
                     layers = photoLayers,
-                    timelineDurationMs = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L),
+                    timelineDurationMs = timelineDurationMs,
                     message = message,
                     onAdd = ::importPhotoLayers,
                     onAddText = ::addTextSticker,
                     onUpdate = { layer -> photoLayers = photoLayers.map { if (it.id == layer.id) layer else it } },
-                    onDelete = { id -> photoLayers = photoLayers.filterNot { it.id == id } }
+                    onDelete = { id -> photoLayers = photoLayers.filterNot { it.id == id } },
+                    onRemoveBackground = ::removeImageBackground
                 )
                 else -> ExportPanel(
                     clips, musicName, titleText, brightness, format, exporting, outputUri != null, message,
@@ -2239,11 +2266,12 @@ private fun LayersPanel(
     onAdd: () -> Unit,
     onAddText: () -> Unit,
     onUpdate: (PhotoLayer) -> Unit,
-    onDelete: (String) -> Unit
+    onDelete: (String) -> Unit,
+    onRemoveBackground: (PhotoLayer) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Layers & overlays", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-        Text("Add image, logo, sticker, or watermark layers on top of your video timeline.", color = Muted, fontSize = 13.sp)
+        Text("Add image, logo, sticker, or watermark layers on top of your video timeline. Person cutout runs on-device for photo layers.", color = Muted, fontSize = 13.sp)
         Button(
             onClick = onAdd,
             modifier = Modifier.fillMaxWidth().height(52.dp),
@@ -2317,6 +2345,18 @@ private fun LayersPanel(
                                     }
                                 }
                             }
+                        }
+                        if (layer.textContent == null && !layer.fullFrame) {
+                            OutlinedButton(
+                                onClick = { onRemoveBackground(layer) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(11.dp)
+                            ) {
+                                Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(17.dp))
+                                Spacer(Modifier.width(7.dp))
+                                Text("AI person cutout")
+                            }
+                            Text("Best for portraits and people. This creates a transparent PNG; it does not remove backgrounds from moving video.", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("IN", color = Muted, fontSize = 11.sp)
@@ -2844,6 +2884,82 @@ private fun buildEditedItems(
     return result
 }
 
+
+
+private fun createPersonCutout(context: Context, uri: Uri): Uri {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        ?: throw IllegalStateException("Could not read the selected image.")
+    if (bounds.outWidth < 1 || bounds.outHeight < 1) throw IllegalStateException("The selected file is not a readable image.")
+
+    var sampleSize = 1
+    while (max(bounds.outWidth / sampleSize, bounds.outHeight / sampleSize) > 1800) sampleSize *= 2
+    val decodeOptions = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val decoded = context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, decodeOptions)
+    } ?: throw IllegalStateException("Could not decode the selected image.")
+    val source = if (decoded.config != Bitmap.Config.ARGB_8888) {
+        decoded.copy(Bitmap.Config.ARGB_8888, false).also { decoded.recycle() }
+    } else decoded
+
+    val segmenter = Segmentation.getClient(
+        SelfieSegmenterOptions.Builder()
+            .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
+            .build()
+    )
+    try {
+        val input = InputImage.fromBitmap(source, 0)
+        val mask = Tasks.await(segmenter.process(input), 90L, TimeUnit.SECONDS)
+        val maskWidth = mask.width
+        val maskHeight = mask.height
+        if (maskWidth < 1 || maskHeight < 1) throw IllegalStateException("The model returned an empty mask.")
+        val maskBuffer = mask.buffer.duplicate().order(ByteOrder.nativeOrder())
+        maskBuffer.rewind()
+        val confidences = FloatArray(maskWidth * maskHeight)
+        for (i in confidences.indices) confidences[i] = maskBuffer.float.coerceIn(0f, 1f)
+
+        val width = source.width
+        val height = source.height
+        val pixels = IntArray(width * height)
+        source.getPixels(pixels, 0, width, 0, 0, width, height)
+        var foregroundPixels = 0
+        for (y in 0 until height) {
+            val maskY = (y.toLong() * maskHeight / height).toInt().coerceIn(0, maskHeight - 1)
+            for (x in 0 until width) {
+                val maskX = (x.toLong() * maskWidth / width).toInt().coerceIn(0, maskWidth - 1)
+                val idx = y * width + x
+                val confidence = confidences[maskY * maskWidth + maskX]
+                // Smoothstep keeps uncertain hair/edge pixels softer than a hard binary cut.
+                val t = ((confidence - 0.12f) / 0.72f).coerceIn(0f, 1f)
+                val alpha = (t * t * (3f - 2f * t) * 255f).toInt().coerceIn(0, 255)
+                if (alpha > 48) foregroundPixels++
+                pixels[idx] = (pixels[idx] and 0x00FFFFFF) or (alpha shl 24)
+            }
+        }
+        if (foregroundPixels < width * height / 200) {
+            throw IllegalStateException("No clear person was detected. Try a sharper photo with a visible person.")
+        }
+        val cutout = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        try {
+            cutout.setPixels(pixels, 0, width, 0, 0, width, height)
+            val outFile = File(context.filesDir, "clipforge_person_cutout_" + System.currentTimeMillis() + ".png")
+            outFile.outputStream().use { output ->
+                if (!cutout.compress(CompressFormat.PNG, 100, output)) {
+                    throw IllegalStateException("Could not write the transparent PNG.")
+                }
+            }
+            return Uri.fromFile(outFile)
+        } finally {
+            cutout.recycle()
+        }
+    } finally {
+        runCatching { segmenter.close() }
+        source.recycle()
+    }
+}
 
 private data class VideoTrackFade(val startMs: Long, val fadeInMs: Long)
 
