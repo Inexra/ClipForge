@@ -28,26 +28,50 @@ data class WordTiming(val text: String, val startMs: Long, val endMs: Long)
 
 data class CaptionSource(val id: String, val uri: Uri, val startMs: Long, val endMs: Long)
 
+enum class CaptionLanguage(
+    val id: String,
+    val displayName: String,
+    val modelName: String,
+    val modelUrl: String
+) {
+    ENGLISH_US(
+        "english",
+        "English",
+        "vosk-model-small-en-us-0.15",
+        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+    ),
+    HINDI(
+        "hindi",
+        "Hindi",
+        "vosk-model-small-hi-0.22",
+        "https://alphacephei.com/vosk/models/vosk-model-small-hi-0.22.zip"
+    );
+
+    companion object {
+        fun fromId(id: String): CaptionLanguage =
+            values().firstOrNull { it.id == id } ?: ENGLISH_US
+    }
+}
+
 /**
- * Offline English caption engine.
+ * Offline captions engine.
  *
  * The small English acoustic model is downloaded once (about 40 MB) and stored on-device.
  * After that first download, video audio is decoded and transcribed locally without sending it anywhere.
  */
 object AutoCaptionEngine {
-    private const val MODEL_NAME = "vosk-model-small-en-us-0.15"
-    private const val MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
     private const val TARGET_RATE = 16_000
     private const val OUTPUT_SAMPLE_PERIOD_US = 1_000_000L / TARGET_RATE
 
     fun transcribeAll(
         context: Context,
         sources: List<CaptionSource>,
+        language: CaptionLanguage = CaptionLanguage.ENGLISH_US,
         onStatus: (String) -> Unit
     ): Map<String, List<WordTiming>> {
         require(sources.isNotEmpty()) { "Import a video first." }
-        val modelDir = ensureModel(context, onStatus)
-        onStatus("Loading offline English speech model…")
+        val modelDir = ensureModel(context, language, onStatus)
+        onStatus("Loading offline " + language.displayName + " speech model…")
         val model = Model(modelDir.absolutePath)
         try {
             val result = linkedMapOf<String, List<WordTiming>>()
@@ -233,21 +257,22 @@ object AutoCaptionEngine {
         }
     }
 
-    private fun ensureModel(context: Context, onStatus: (String) -> Unit): File {
-        val destination = File(context.filesDir, MODEL_NAME)
+    private fun ensureModel(context: Context, language: CaptionLanguage, onStatus: (String) -> Unit): File {
+        val modelName = language.modelName
+        val destination = File(context.filesDir, modelName)
         if (File(destination, "am/final.mdl").exists() && File(destination, "conf/mfcc.conf").exists()) {
             return destination
         }
 
         destination.deleteRecursively()
         destination.mkdirs()
-        val archive = File(context.cacheDir, "$MODEL_NAME.zip")
-        val connection = URL(MODEL_URL).openConnection() as HttpURLConnection
+        val archive = File(context.cacheDir, "$modelName.zip")
+        val connection = URL(language.modelUrl).openConnection() as HttpURLConnection
         connection.connectTimeout = 20_000
         connection.readTimeout = 30_000
         connection.instanceFollowRedirects = true
         try {
-            onStatus("Downloading offline English caption model (about 40 MB)…")
+            onStatus("Downloading offline " + language.displayName + " caption model (about 40 MB)…")
             connection.connect()
             if (connection.responseCode !in 200..299) {
                 throw IllegalStateException("Model download failed (HTTP ${connection.responseCode}). Check your internet and retry.")
@@ -265,7 +290,7 @@ object AutoCaptionEngine {
                         received += count
                         if (received >= nextReport) {
                             val progress = if (total > 0) " (${received / (1024 * 1024)} / ${total / (1024 * 1024)} MB)" else ""
-                            onStatus("Downloading offline English caption model$progress…")
+                            onStatus("Downloading offline " + language.displayName + " caption model$progress…")
                             nextReport += 4L * 1024 * 1024
                         }
                     }
@@ -280,8 +305,8 @@ object AutoCaptionEngine {
             ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
-                    var relative = entry.name.removePrefix("$MODEL_NAME/")
-                    if (relative == entry.name && entry.name == "$MODEL_NAME") relative = ""
+                    var relative = entry.name.removePrefix("$modelName/")
+                    if (relative == entry.name && entry.name == modelName) relative = ""
                     if (relative.isNotBlank()) {
                         val target = File(destination, relative)
                         if (!target.canonicalPath.startsWith(root)) {
