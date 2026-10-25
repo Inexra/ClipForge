@@ -2,13 +2,16 @@
 
 package com.clipforge.app
 
+import android.Manifest
 import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,6 +27,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -57,6 +61,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -231,7 +236,12 @@ private fun ClipForgeApp() {
     var photoLayers by remember { mutableStateOf<List<PhotoLayer>>(emptyList()) }
     var voiceover by remember { mutableStateOf<Uri?>(null) }
     var voiceoverName by remember { mutableStateOf<String?>(null) }
+    var voiceoverRecording by remember { mutableStateOf(false) }
+    var voiceRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var voiceoverFile by remember { mutableStateOf<File?>(null) }
     var beatMarkers by remember { mutableStateOf<List<Long>>(emptyList()) }
+    val undoStack = remember { mutableStateListOf<Project>() }
+    val redoStack = remember { mutableStateListOf<Project>() }
     var muteVideoAudio by remember { mutableStateOf(false) }
     var format by remember { mutableStateOf("Original") }
     var tab by remember { mutableStateOf(0) }
@@ -248,11 +258,60 @@ private fun ClipForgeApp() {
     val player = remember(context) { ExoPlayer.Builder(context).build() }
     val audioPlayer = remember(context) { ExoPlayer.Builder(context).build() }
     DisposableEffect(player, audioPlayer) {
-        onDispose { player.release(); audioPlayer.release() }
+        onDispose {
+            runCatching { voiceRecorder?.stop() }
+            runCatching { voiceRecorder?.release() }
+            voiceRecorder = null
+            player.release()
+            audioPlayer.release()
+        }
     }
 
     val selectedIndex = clips.indexOfFirst { it.id == selectedId }
     val selected = clips.getOrNull(selectedIndex)
+    val timelineDurationMs = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L)
+    val timelinePositionMs = clips.take(selectedIndex.coerceAtLeast(0)).sumOf { (it.durationMs / it.speed).toLong() } +
+        if (selected != null) (position / selected.speed).toLong() else 0L
+
+    fun currentProject() = Project(
+        clips, music, titleText, brightness, muteVideoAudio, format,
+        captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers
+    )
+    fun recordUndo() {
+        val snapshot = currentProject()
+        if (undoStack.lastOrNull() != snapshot) undoStack.add(snapshot)
+        while (undoStack.size > 40) undoStack.removeAt(0)
+        redoStack.clear()
+    }
+    fun restoreProject(project: Project) {
+        clips = project.clips
+        selectedId = project.clips.firstOrNull()?.id
+        music = project.music
+        musicName = project.music?.let { nameForUri(context, it) }
+        titleText = project.titleText
+        brightness = project.brightness
+        saturation = project.saturation
+        filterPreset = project.filterPreset
+        captions = project.captions
+        photoLayers = project.photoLayers
+        voiceover = project.voiceover
+        voiceoverName = project.voiceover?.let { nameForUri(context, it) }
+        beatMarkers = project.beatMarkers
+        muteVideoAudio = project.muteVideoAudio
+        format = project.format
+    }
+    fun undoProject() {
+        if (undoStack.isEmpty()) return
+        redoStack.add(currentProject())
+        restoreProject(undoStack.removeAt(undoStack.lastIndex))
+        message = "Undo complete."
+    }
+    fun redoProject() {
+        if (redoStack.isEmpty()) return
+        undoStack.add(currentProject())
+        restoreProject(redoStack.removeAt(redoStack.lastIndex))
+        message = "Redo complete."
+    }
 
     LaunchedEffect(Unit) {
         val saved = withContext(Dispatchers.IO) { loadProject(context) }
@@ -344,6 +403,7 @@ private fun ClipForgeApp() {
                 }
                 if (imported.isEmpty()) message = "No readable video found. Try MP4 or MOV."
                 else {
+                    recordUndo()
                     clips = clips + imported
                     if (selectedId == null) selectedId = imported.first().id
                     tab = 0
@@ -373,6 +433,7 @@ private fun ClipForgeApp() {
                             ?: throw IllegalStateException("Could not read the subtitle file.")
                     }
                     val parsed = parseSrtText(text, clips)
+                    recordUndo()
                     captions = parsed
                     message = if (parsed.isEmpty()) "No valid SRT subtitles were found." else "Imported " + parsed.size + " subtitle lines."
                 } catch (error: Exception) {
@@ -411,9 +472,72 @@ private fun ClipForgeApp() {
                         PhotoLayer(uri = uri, name = nameForUri(context, uri), startMs = 0L, endMs = totalDuration)
                     }
                 }
+                recordUndo()
                 photoLayers = photoLayers + additions
                 message = "Added " + additions.size + " image layer(s). Adjust their timing and position in Layers."
             }
+        }
+    }
+
+    fun startVoiceRecordingActual() {
+        if (voiceoverRecording) return
+        val file = File(context.filesDir, "clipforge_voiceover_" + System.currentTimeMillis() + ".m4a")
+        var active: MediaRecorder? = null
+        try {
+            active = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else MediaRecorder()
+            active.setAudioSource(MediaRecorder.AudioSource.MIC)
+            active.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            active.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            active.setAudioSamplingRate(44_100)
+            active.setAudioEncodingBitRate(128_000)
+            active.setOutputFile(file.absolutePath)
+            active.prepare()
+            active.start()
+            voiceRecorder = active
+            voiceoverFile = file
+            voiceoverRecording = true
+            message = "Recording voice-over from the beginning. Tap Stop recording when finished."
+        } catch (error: Exception) {
+            runCatching { active?.release() }
+            file.delete()
+            message = "Could not start voice recording: " + (error.message ?: "microphone unavailable")
+        }
+    }
+
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) startVoiceRecordingActual()
+        else message = "Microphone permission is required to record a voice-over."
+    }
+
+    fun startVoiceRecording() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            startVoiceRecordingActual()
+        } else {
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    fun stopVoiceRecording() {
+        val active = voiceRecorder
+        val recordedFile = voiceoverFile
+        voiceRecorder = null
+        voiceoverRecording = false
+        var succeeded = true
+        try {
+            active?.stop()
+        } catch (_: Exception) {
+            succeeded = false
+        } finally {
+            runCatching { active?.release() }
+        }
+        if (succeeded && recordedFile != null && recordedFile.exists() && recordedFile.length() > 1_024L) {
+            recordUndo()
+            voiceover = Uri.fromFile(recordedFile)
+            voiceoverName = recordedFile.name
+            message = "Voice-over saved. It will be mixed from the beginning of the video."
+        } else {
+            recordedFile?.delete()
+            message = "Voice recording was too short or failed. Please record again."
         }
     }
 
@@ -441,6 +565,7 @@ private fun ClipForgeApp() {
                 if (generated.isEmpty()) {
                     message = "No clear English speech was detected. You can still add/edit subtitles manually or import an SRT."
                 } else {
+                    recordUndo()
                     val currentClipIds = clips.map { it.id }.toSet()
                     captions = captions.filterNot { it.clipId in currentClipIds } + generated
                     message = "Generated " + generated.size + " caption lines on-device. Review names and timing before export."
@@ -457,6 +582,7 @@ private fun ClipForgeApp() {
 
     fun commitTrim() {
         val clip = selected ?: return
+        recordUndo()
         val start = trimStart.coerceIn(0L, (clip.sourceMs - 100L).coerceAtLeast(0L))
         val end = trimEnd.coerceIn(start + 100L, clip.sourceMs)
         updateClip(clip.copy(startMs = start, endMs = end))
@@ -471,6 +597,7 @@ private fun ClipForgeApp() {
             message = "Move the playhead nearer to the middle, then split."
             return
         }
+        recordUndo()
         val left = clip.copy(id = UUID.randomUUID().toString(), endMs = cut)
         val right = clip.copy(id = UUID.randomUUID().toString(), startMs = cut)
         clips = clips.toMutableList().apply {
@@ -484,6 +611,7 @@ private fun ClipForgeApp() {
 
     fun deleteClip() {
         if (selectedIndex < 0) return
+        recordUndo()
         val updated = clips.toMutableList()
         updated.removeAt(selectedIndex)
         clips = updated
@@ -495,6 +623,7 @@ private fun ClipForgeApp() {
         if (selectedIndex < 0) return
         val target = (selectedIndex + direction).coerceIn(0, clips.lastIndex)
         if (target == selectedIndex) return
+        recordUndo()
         clips = clips.toMutableList().apply { add(target, removeAt(selectedIndex)) }
     }
 
@@ -516,6 +645,10 @@ private fun ClipForgeApp() {
             music?.let { audioUri ->
                 val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(audioUri)).build()
                 sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(audioItem)).buildUpon().setIsLooping(true).build())
+            }
+            voiceover?.let { voiceUri ->
+                val voiceItem = EditedMediaItem.Builder(MediaItem.fromUri(voiceUri)).build()
+                sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(voiceItem)))
             }
             val composition = Composition.Builder(sequenceList).build()
             exporting = true
@@ -578,6 +711,8 @@ private fun ClipForgeApp() {
             when (tab) {
                 0 -> EditorPanel(
                     clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, message,
+                    canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
+                    onUndo = ::undoProject, onRedo = ::redoProject,
                     onImport = ::importVideos,
                     onSelect = { selectedId = it },
                     onSeek = { positionMs -> player.seekTo(positionMs); position = positionMs },
@@ -595,14 +730,38 @@ private fun ClipForgeApp() {
                 )
                 1 -> AudioPanel(
                     musicName, music != null, musicPlaying, muteVideoAudio, message,
+                    voiceoverName = voiceoverName,
+                    hasVoiceover = voiceover != null,
+                    voiceoverRecording = voiceoverRecording,
+                    beatMarkers = beatMarkers,
+                    timelinePositionMs = timelinePositionMs,
+                    timelineDurationMs = timelineDurationMs,
                     onPick = ::importMusic,
-                    onRemove = { music = null; musicName = null; message = "Background track removed." },
+                    onRemove = { recordUndo(); music = null; musicName = null; message = "Background track removed." },
                     onPreview = {
                         if (music == null) importMusic()
                         else if (musicPlaying) { audioPlayer.pause(); musicPlaying = false }
                         else { audioPlayer.play(); musicPlaying = true }
                     },
-                    onMute = { muteVideoAudio = it }
+                    onMute = { recordUndo(); muteVideoAudio = it },
+                    onStartVoiceover = ::startVoiceRecording,
+                    onStopVoiceover = ::stopVoiceRecording,
+                    onRemoveVoiceover = {
+                        recordUndo()
+                        voiceover?.path?.let { path -> File(path).takeIf { it.exists() }?.delete() }
+                        voiceover = null
+                        voiceoverName = null
+                        message = "Voice-over removed."
+                    },
+                    onMarkBeat = {
+                        recordUndo()
+                        beatMarkers = (beatMarkers + timelinePositionMs.coerceIn(0L, timelineDurationMs)).distinct().sorted()
+                        message = "Beat marker added at " + time(timelinePositionMs) + "."
+                    },
+                    onDeleteBeat = { marker ->
+                        recordUndo()
+                        beatMarkers = beatMarkers.filterNot { it == marker }
+                    }
                 )
                 2 -> MotionPanel(
                     selected, titleText, brightness, saturation, filterPreset, message,
@@ -663,6 +822,7 @@ private fun EditorPanel(
     clips: List<Clip>, selectedId: String?, selectedIndex: Int, selected: Clip?, player: ExoPlayer,
     position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
     photoLayers: List<PhotoLayer>, message: String?,
+    canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
     onImport: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
@@ -679,6 +839,16 @@ private fun EditorPanel(
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Your timeline", fontSize = 27.sp, fontWeight = FontWeight.Bold)
             Text("Import • trim • split • arrange • export", fontSize = 12.sp, color = Muted)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onUndo, enabled = canUndo, shape = RoundedCornerShape(11.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 7.dp)) {
+                Text("Undo")
+            }
+            OutlinedButton(onClick = onRedo, enabled = canRedo, shape = RoundedCornerShape(11.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 7.dp)) {
+                Text("Redo")
+            }
         }
         if (selected == null) {
             Card(shape = RoundedCornerShape(23.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
@@ -826,7 +996,11 @@ private fun EditorPanel(
 @Composable
 private fun AudioPanel(
     musicName: String?, hasMusic: Boolean, playing: Boolean, muted: Boolean, message: String?,
-    onPick: () -> Unit, onRemove: () -> Unit, onPreview: () -> Unit, onMute: (Boolean) -> Unit
+    voiceoverName: String?, hasVoiceover: Boolean, voiceoverRecording: Boolean,
+    beatMarkers: List<Long>, timelinePositionMs: Long, timelineDurationMs: Long,
+    onPick: () -> Unit, onRemove: () -> Unit, onPreview: () -> Unit, onMute: (Boolean) -> Unit,
+    onStartVoiceover: () -> Unit, onStopVoiceover: () -> Unit, onRemoveVoiceover: () -> Unit,
+    onMarkBeat: () -> Unit, onDeleteBeat: (Long) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Sound & music", fontSize = 27.sp, fontWeight = FontWeight.Bold)
@@ -862,6 +1036,88 @@ private fun AudioPanel(
                 }
             }
         }
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Mic, null, tint = Lime, modifier = Modifier.size(27.dp))
+                    Spacer(Modifier.width(9.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Voice-over recording", fontWeight = FontWeight.Bold)
+                        Text(
+                            when {
+                                voiceoverRecording -> "Recording now…"
+                                hasVoiceover -> voiceoverName ?: "Voice-over ready"
+                                else -> "Record narration directly on your phone"
+                            },
+                            color = if (voiceoverRecording) Lime else Muted,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (voiceoverRecording) {
+                    Button(onClick = onStopVoiceover, modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF7777), contentColor = Color.Black)) {
+                        Icon(Icons.Default.Pause, null)
+                        Spacer(Modifier.width(7.dp))
+                        Text("Stop recording", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    Button(onClick = onStartVoiceover, modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(13.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Bg)) {
+                        Icon(Icons.Default.Mic, null)
+                        Spacer(Modifier.width(7.dp))
+                        Text(if (hasVoiceover) "Record replacement voice-over" else "Start voice-over recording", fontWeight = FontWeight.Bold)
+                    }
+                }
+                if (hasVoiceover) {
+                    OutlinedButton(onClick = onRemoveVoiceover, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                        Icon(Icons.Default.Delete, null)
+                        Spacer(Modifier.width(5.dp))
+                        Text("Remove voice-over")
+                    }
+                }
+                Text("Voice-over aligns to the start of the timeline and mixes with background music. Use headphones to avoid speaker audio leaking into the microphone.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+            }
+        }
+
+        Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("Beat markers", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("Tap while listening to mark cuts or sync points.", color = Muted, fontSize = 11.sp)
+                    }
+                    Text(time(timelinePositionMs), color = Lime, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                }
+                Button(onClick = onMarkBeat, modifier = Modifier.fillMaxWidth().height(46.dp),
+                    shape = RoundedCornerShape(13.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PanelAlt, contentColor = Lime)) {
+                    Icon(Icons.Default.Add, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Mark current beat")
+                }
+                if (beatMarkers.isEmpty()) {
+                    Text("No markers yet · total timeline " + time(timelineDurationMs), color = Muted, fontSize = 11.sp)
+                } else {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        beatMarkers.forEach { marker ->
+                            Surface(
+                                modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onDeleteBeat(marker) },
+                                color = Color(0xFF28351E), shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text(time(marker) + " ×", modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    color = Lime, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
