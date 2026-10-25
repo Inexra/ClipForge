@@ -1194,16 +1194,31 @@ private fun ClipForgeApp() {
                     onSelect = { selectedId = it },
                     onSeek = { positionMs -> player.seekTo(positionMs); position = positionMs },
                     onPlay = { if (player.isPlaying) player.pause() else player.play() },
-                    onStartChange = { trimStart = it.coerceIn(0L, (trimEnd - 100L).coerceAtLeast(0L)) },
+                    onStartChange = { value ->
+                        val clip = selected
+                        val snapped = if (snapToBeats && clip != null) snapTrimToBeat(
+                            clip, value, clipStartOffsetsMs.getOrNull(selectedIndex) ?: 0L, beatMarkers
+                        ) else value
+                        trimStart = snapped.coerceIn(0L, (trimEnd - 100L).coerceAtLeast(0L))
+                    },
                     onEndChange = { value ->
+                        val clip = selected
+                        val snapped = if (snapToBeats && clip != null) snapTrimToBeat(
+                            clip, value, clipStartOffsetsMs.getOrNull(selectedIndex) ?: 0L, beatMarkers
+                        ) else value
                         val maxEnd = selected?.sourceMs ?: value
-                        trimEnd = value.coerceIn((trimStart + 100L).coerceAtMost(maxEnd), maxEnd)
+                        trimEnd = snapped.coerceIn((trimStart + 100L).coerceAtMost(maxEnd), maxEnd)
                     },
                     onTrim = ::commitTrim,
                     onSplit = ::splitClip,
                     onDelete = ::deleteClip,
                     onMove = ::moveClip,
                     onAdd = ::importVideos,
+                    beatMarkers = beatMarkers,
+                    timelineZoom = timelineZoom,
+                    snapToBeats = snapToBeats,
+                    onTimelineZoom = { timelineZoom = it },
+                    onToggleSnap = { snapToBeats = !snapToBeats },
                     autoClipSuggestions = autoClipSuggestions,
                     autoClipSourceName = autoClipSource?.name,
                     autoClipDurationMs = autoClipDurationMs,
@@ -1214,13 +1229,16 @@ private fun ClipForgeApp() {
                     onAddAllAutoClips = ::addAllAutoClipSuggestions
                 )
                 1 -> AudioPanel(
-                    musicName, music != null, musicPlaying, muteVideoAudio, message,
+                    musicName, music, music != null, musicPlaying, muteVideoAudio, message,
                     voiceoverName = voiceoverName,
                     hasVoiceover = voiceover != null,
                     voiceoverRecording = voiceoverRecording,
                     sourceVolume = sourceVolume,
                     musicVolume = musicVolume,
                     voiceoverVolume = voiceoverVolume,
+                    musicFadeInMs = musicFadeInMs,
+                    musicFadeOutMs = musicFadeOutMs,
+                    duckMusicUnderVoiceover = duckMusicUnderVoiceover,
                     beatMarkers = beatMarkers,
                     beatDetecting = beatDetecting,
                     timelinePositionMs = timelinePositionMs,
@@ -1236,6 +1254,9 @@ private fun ClipForgeApp() {
                     onSourceVolume = { recordUndo(); sourceVolume = it },
                     onMusicVolume = { recordUndo(); musicVolume = it },
                     onVoiceoverVolume = { recordUndo(); voiceoverVolume = it },
+                    onMusicFadeIn = { recordUndo(); musicFadeInMs = it },
+                    onMusicFadeOut = { recordUndo(); musicFadeOutMs = it },
+                    onDuckMusic = { recordUndo(); duckMusicUnderVoiceover = it },
                     onStartVoiceover = ::startVoiceRecording,
                     onStopVoiceover = ::stopVoiceRecording,
                     onRemoveVoiceover = {
@@ -1300,6 +1321,8 @@ private fun ClipForgeApp() {
                     onShare = ::shareVideo,
                     quality = exportQuality,
                     frameRate = exportFrameRate,
+                    exportProgress = exportProgress,
+                    freeStorageBytes = StatFs(context.cacheDir.absolutePath).availableBytes,
                     onQuality = { exportQuality = it },
                     onFrameRate = { exportFrameRate = it }
                 )
@@ -1702,15 +1725,23 @@ private fun VolumeControl(label: String, value: Float, onChange: (Float) -> Unit
 
 @Composable
 private fun AudioPanel(
-    musicName: String?, hasMusic: Boolean, playing: Boolean, muted: Boolean, message: String?,
+    musicName: String?, musicUri: Uri?, hasMusic: Boolean, playing: Boolean, muted: Boolean, message: String?,
     voiceoverName: String?, hasVoiceover: Boolean, voiceoverRecording: Boolean,
     sourceVolume: Float, musicVolume: Float, voiceoverVolume: Float,
+    musicFadeInMs: Long, musicFadeOutMs: Long, duckMusicUnderVoiceover: Boolean,
     beatMarkers: List<Long>, beatDetecting: Boolean, timelinePositionMs: Long, timelineDurationMs: Long,
     onPick: () -> Unit, onRemove: () -> Unit, onPreview: () -> Unit, onMute: (Boolean) -> Unit,
     onSourceVolume: (Float) -> Unit, onMusicVolume: (Float) -> Unit, onVoiceoverVolume: (Float) -> Unit,
+    onMusicFadeIn: (Long) -> Unit, onMusicFadeOut: (Long) -> Unit, onDuckMusic: (Boolean) -> Unit,
     onStartVoiceover: () -> Unit, onStopVoiceover: () -> Unit, onRemoveVoiceover: () -> Unit,
     onMarkBeat: () -> Unit, onDetectBeats: () -> Unit, onDeleteBeat: (Long) -> Unit
 ) {
+    val context = LocalContext.current
+    val waveform by produceState<List<Float>>(initialValue = emptyList(), key1 = musicUri) {
+        value = if (musicUri == null) emptyList() else withContext(Dispatchers.IO) {
+            runCatching { OfflineWaveformAnalyzer.analyze(context, musicUri, 92) }.getOrDefault(emptyList())
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Sound & music", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Add a background track and control the original clip audio.", color = Muted, fontSize = 13.sp)
@@ -1731,6 +1762,10 @@ private fun AudioPanel(
                     Text(if (hasMusic) "Replace music" else "Choose music file", fontWeight = FontWeight.Bold)
                 }
                 if (hasMusic) {
+                    if (waveform.isNotEmpty()) {
+                        WaveformBars(waveform, Modifier.fillMaxWidth().height(48.dp))
+                        Text("Decoded audio waveform · analyzed on this phone", color = Muted, fontSize = 10.sp)
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = onPreview, modifier = Modifier.weight(1f), shape = RoundedCornerShape(13.dp)) {
                             Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null)
@@ -1741,6 +1776,30 @@ private fun AudioPanel(
                             Icon(Icons.Default.Delete, null)
                             Text("Remove")
                         }
+                    }
+                }
+                if (hasMusic) {
+                    HorizontalDivider(color = PanelAlt)
+                    Text("Music fade-in", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("0 sec", color = Muted, fontSize = 10.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.1f sec", musicFadeInMs / 1_000f), color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(value = musicFadeInMs.toFloat(), onValueChange = { onMusicFadeIn(it.toLong()) }, valueRange = 0f..5_000f)
+                    Text("Music fade-out", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("0 sec", color = Muted, fontSize = 10.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.1f sec", musicFadeOutMs / 1_000f), color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(value = musicFadeOutMs.toFloat(), onValueChange = { onMusicFadeOut(it.toLong()) }, valueRange = 0f..5_000f)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text("Lower music under voice-over", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("Ducks the music track while a narration track is present.", color = Muted, fontSize = 10.sp, lineHeight = 14.sp)
+                        }
+                        Switch(checked = duckMusicUnderVoiceover, onCheckedChange = onDuckMusic)
                     }
                 }
             }
@@ -1923,6 +1982,48 @@ private fun MotionPanel(
                         }
                     }
                     Text("Curves are rendered from short time slices and can take longer to export.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
+
+                    HorizontalDivider(color = PanelAlt)
+                    Text("CLIP AUDIO KEYFRAMES", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                    listOf(
+                        "Start volume" to selected.audioVolumeStart,
+                        "Middle volume" to selected.audioVolumeMid,
+                        "End volume" to selected.audioVolumeEnd
+                    ).forEachIndexed { keyIndex, pair ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(pair.first, color = Muted, fontSize = 12.sp)
+                            Spacer(Modifier.weight(1f))
+                            Text((pair.second * 100).toInt().toString() + "%", color = Lime, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                        Slider(
+                            value = pair.second,
+                            onValueChange = { value ->
+                                onClipChange(when (keyIndex) {
+                                    0 -> selected.copy(audioVolumeStart = value)
+                                    1 -> selected.copy(audioVolumeMid = value)
+                                    else -> selected.copy(audioVolumeEnd = value)
+                                })
+                            },
+                            valueRange = 0f..1f
+                        )
+                    }
+                    listOf("Audio fade-in" to selected.audioFadeInMs, "Audio fade-out" to selected.audioFadeOutMs)
+                        .forEach { pair ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(pair.first, color = Muted, fontSize = 12.sp)
+                                Spacer(Modifier.weight(1f))
+                                Text(String.format(Locale.US, "%.1f sec", pair.second / 1_000f), color = Lime, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Slider(
+                                value = pair.second.toFloat(),
+                                onValueChange = { value ->
+                                    if (pair.first == "Audio fade-in") onClipChange(selected.copy(audioFadeInMs = value.toLong()))
+                                    else onClipChange(selected.copy(audioFadeOutMs = value.toLong()))
+                                },
+                                valueRange = 0f..5_000f
+                            )
+                        }
+                    Text("Audio volume is interpolated across start/middle/end points; fades apply to the selected clip's original audio.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
 
                     HorizontalDivider(color = PanelAlt)
                     Text("CROP & REFRAME", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 1.1.sp)
@@ -2144,7 +2245,7 @@ private fun CaptionsPanel(
                         Text("On-device auto captions", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         Text(
                             (if (captionLanguageId == "hindi") "Hindi" else "English") +
-                                " speech model · stored on this phone after first download",
+                                " offline speech model · bundled in the APK",
                             color = Muted, fontSize = 11.sp, lineHeight = 16.sp
                         )
                     }
@@ -2170,7 +2271,7 @@ private fun CaptionsPanel(
                 }
                 Text("CAPTION STYLE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    listOf("Classic", "Yellow Pop", "Neon", "Minimal").forEach { style ->
+                    listOf("Classic", "Yellow Pop", "Neon", "Minimal", "Karaoke").forEach { style ->
                         val active = captionStyle == style
                         Surface(
                             modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onCaptionStyle(style) },
@@ -2385,11 +2486,13 @@ private fun ExportPanel(
     clips: List<Clip>, musicName: String?, titleText: String, brightness: Float, format: String,
     exporting: Boolean, hasOutput: Boolean, message: String?,
     onFormat: (String) -> Unit, onExport: () -> Unit, onCancel: () -> Unit, onShare: () -> Unit,
-    quality: String, frameRate: Int, onQuality: (String) -> Unit, onFrameRate: (Int) -> Unit
+    quality: String, frameRate: Int, exportProgress: Int, freeStorageBytes: Long,
+    onQuality: (String) -> Unit, onFrameRate: (Int) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Export video", fontSize = 27.sp, fontWeight = FontWeight.Bold)
         Text("Render your edited timeline to an MP4 on this phone.", color = Muted, fontSize = 13.sp)
+        Text("Free storage: " + (freeStorageBytes / (1024L * 1024L)) + " MB · keep extra room for the temporary render and Gallery copy.", color = Muted, fontSize = 11.sp)
         Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(13.dp)) {
                 Text("PROJECT SUMMARY", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.3.sp)
@@ -2447,8 +2550,8 @@ private fun ExportPanel(
                 Text("Higher resolution/quality can make exports much larger and slower. The phone's hardware encoder may lower unsupported output settings. FPS caps drop frames; they do not create optical-flow/interpolated frames.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 Text("MP4 · H.264 video · AAC audio", color = Muted, fontSize = 12.sp)
                 if (exporting) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = Lime)
-                    Text("Rendering on device. Large videos can take several minutes.", color = Muted, fontSize = 12.sp)
+                    LinearProgressIndicator(progress = exportProgress.coerceIn(0, 100) / 100f, modifier = Modifier.fillMaxWidth(), color = Lime)
+                    Text("Rendering on device · " + exportProgress.coerceIn(0, 100) + "%. Large videos can take several minutes.", color = Muted, fontSize = 12.sp)
                     OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel export") }
                 } else {
                     Button(
