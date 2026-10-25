@@ -115,6 +115,7 @@ import androidx.media3.common.audio.DefaultGainProvider
 import androidx.media3.common.audio.GainProcessor
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.Brightness
+import androidx.media3.effect.Crop
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.HslAdjustment
 import androidx.media3.effect.RgbFilter
@@ -166,7 +167,10 @@ private data class Clip(
     val rotationStart: Float = 0f,
     val rotationEnd: Float = 0f,
     val transition: String = "Cut",
-    val speedCurve: String = "Constant"
+    val speedCurve: String = "Constant",
+    val cropZoom: Float = 1f,
+    val cropX: Float = 0f,
+    val cropY: Float = 0f
 ) {
     val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
 }
@@ -1114,8 +1118,10 @@ private fun EditorPanel(
                     Box(Modifier.fillMaxWidth().aspectRatio(1.28f).clip(RoundedCornerShape(15.dp)).background(Color.Black)) {
                         AndroidView(
                             modifier = Modifier.fillMaxSize().graphicsLayer(
-                                scaleX = previewZoom,
-                                scaleY = previewZoom,
+                                scaleX = previewZoom * (selected?.cropZoom ?: 1f),
+                                scaleY = previewZoom * (selected?.cropZoom ?: 1f),
+                                translationX = (selected?.cropX ?: 0f) * 120f,
+                                translationY = (selected?.cropY ?: 0f) * 120f,
                                 rotationZ = previewRotation
                             ),
                             factory = { ctx ->
@@ -1470,6 +1476,41 @@ private fun MotionPanel(
                     Text("Curves are rendered from short time slices and can take longer to export.", color = Muted, fontSize = 10.sp, lineHeight = 15.sp)
 
                     HorizontalDivider(color = PanelAlt)
+                    Text("CROP & REFRAME", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 1.1.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Crop zoom", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(String.format(Locale.US, "%.2fx", selected.cropZoom), color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.cropZoom,
+                        onValueChange = { onClipChange(selected.copy(cropZoom = it)) },
+                        valueRange = 1f..2.5f
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Horizontal pan", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(selected.cropX.toInt().toString(), color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.cropX,
+                        onValueChange = { onClipChange(selected.copy(cropX = it)) },
+                        valueRange = -1f..1f
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Vertical pan", color = Muted, fontSize = 12.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(selected.cropY.toInt().toString(), color = Lime, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Slider(
+                        value = selected.cropY,
+                        onValueChange = { onClipChange(selected.copy(cropY = it)) },
+                        valueRange = -1f..1f
+                    )
+                    OutlinedButton(onClick = { onClipChange(selected.copy(cropZoom = 1f, cropX = 0f, cropY = 0f)) },
+                        shape = RoundedCornerShape(11.dp)) { Text("Reset crop") }
+
+                    HorizontalDivider(color = PanelAlt)
                     Text("START KEYFRAME  •  FRAME 0", color = Lime, fontWeight = FontWeight.Bold, fontSize = 10.sp)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Zoom", color = Muted, fontSize = 12.sp)
@@ -1751,7 +1792,7 @@ private fun ExportPanel(
                 HorizontalDivider(color = PanelAlt)
                 Text("Canvas format", fontWeight = FontWeight.Bold)
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    listOf("Original", "9:16 Shorts", "16:9 Video", "1:1 Square").forEach { option ->
+                    listOf("Original", "9:16 Shorts", "9:16 FHD", "16:9 Video", "16:9 FHD", "1:1 Square").forEach { option ->
                         val selected = format == option
                         Surface(
                             modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onFormat(option) },
@@ -2128,6 +2169,12 @@ private fun buildEditedItems(
                 override fun getSpeed(timeUs: Long): Float = segmentSpeed
                 override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
             }
+            val cropHalf = 1f / clip.cropZoom.coerceIn(1f, 2.5f)
+            val cropCenterX = clip.cropX.coerceIn(-1f, 1f) * (1f - cropHalf)
+            val cropCenterY = clip.cropY.coerceIn(-1f, 1f) * (1f - cropHalf)
+            if (clip.cropZoom > 1f || clip.cropX != 0f || clip.cropY != 0f) {
+                effects.add(Crop(cropCenterX - cropHalf, cropCenterX + cropHalf, cropCenterY - cropHalf, cropCenterY + cropHalf))
+            }
             val keyZoom = clip.zoomStart + (clip.zoomEnd - clip.zoomStart) * fraction
             val keyRotation = clip.rotationStart + (clip.rotationEnd - clip.rotationStart) * fraction
             val inRatio = if (transitionLength > 0L && transitionIn != "Cut" && mid < transitionLength) {
@@ -2213,7 +2260,9 @@ private fun buildEditedItems(
 
             when (format) {
                 "9:16 Shorts" -> effects.add(Presentation.createForWidthAndHeight(720, 1280, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "9:16 FHD" -> effects.add(Presentation.createForWidthAndHeight(1080, 1920, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "16:9 Video" -> effects.add(Presentation.createForWidthAndHeight(1280, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "16:9 FHD" -> effects.add(Presentation.createForWidthAndHeight(1920, 1080, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "1:1 Square" -> effects.add(Presentation.createForWidthAndHeight(720, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
             }
 
@@ -2335,7 +2384,10 @@ private fun loadProject(context: Context): Project {
                     rotationStart = o.optDouble("rotationStart", 0.0).toFloat().coerceIn(-180f, 180f),
                     rotationEnd = o.optDouble("rotationEnd", 0.0).toFloat().coerceIn(-180f, 180f),
                     transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut",
-                    speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant"
+                    speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant",
+                    cropZoom = o.optDouble("cropZoom", 1.0).toFloat().coerceIn(1f, 2.5f),
+                    cropX = o.optDouble("cropX", 0.0).toFloat().coerceIn(-1f, 1f),
+                    cropY = o.optDouble("cropY", 0.0).toFloat().coerceIn(-1f, 1f)
                 ))
             }
         }
@@ -2422,6 +2474,9 @@ private fun saveProject(context: Context, project: Project) {
             put("rotationEnd", clip.rotationEnd)
             put("transition", clip.transition)
             put("speedCurve", clip.speedCurve)
+            put("cropZoom", clip.cropZoom)
+            put("cropX", clip.cropX)
+            put("cropY", clip.cropY)
         })
     }
     val subtitleArray = JSONArray()
