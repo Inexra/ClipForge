@@ -159,6 +159,7 @@ object ProjectArchive {
                 when (key) {
                     "brightness", "saturation", "sourceVolume", "musicVolume", "voiceoverVolume" ->
                         editor.putFloat(key, json.optDouble(key, 0.0).toFloat())
+                    "exportFrameRate" -> editor.putInt(key, json.optInt(key, 30))
                     "mute" -> editor.putBoolean(key, json.optBoolean(key, false))
                     else -> {
                         val value = json.opt(key)
