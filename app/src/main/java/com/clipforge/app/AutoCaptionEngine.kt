@@ -42,8 +42,8 @@ enum class CaptionLanguage(
 /**
  * Offline captions engine.
  *
- * The small English acoustic model is downloaded once (about 40 MB) and stored on-device.
- * After that first download, video audio is decoded and transcribed locally without sending it anywhere.
+ * English and Hindi Vosk models are bundled inside the official APK, copied to app-private storage
+ * on first use, and then run locally. Source media and recognized speech are never uploaded.
  */
 object AutoCaptionEngine {
     private const val TARGET_RATE = 16_000
