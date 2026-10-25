@@ -125,6 +125,9 @@ import androidx.media3.effect.Presentation
 import androidx.media3.effect.StaticOverlaySettings
 import androidx.media3.effect.TextOverlay
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.transformer.AudioEncoderSettings
+import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.VideoEncoderSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
@@ -215,7 +218,9 @@ private data class Project(
     val captionLanguageId: String = "english",
     val sourceVolume: Float = 1f,
     val musicVolume: Float = 1f,
-    val voiceoverVolume: Float = 1f
+    val voiceoverVolume: Float = 1f,
+    val exportQuality: String = "High",
+    val exportFrameRate: Int = 30
 )
 
 class MainActivity : ComponentActivity() {
@@ -246,6 +251,8 @@ private fun ClipForgeApp() {
     var sourceVolume by remember { mutableStateOf(1f) }
     var musicVolume by remember { mutableStateOf(1f) }
     var voiceoverVolume by remember { mutableStateOf(1f) }
+    var exportQuality by remember { mutableStateOf("High") }
+    var exportFrameRate by remember { mutableStateOf(30) }
     var titleText by remember { mutableStateOf("") }
     var brightness by remember { mutableStateOf(0f) }
     var saturation by remember { mutableStateOf(0f) }
@@ -298,7 +305,7 @@ private fun ClipForgeApp() {
     fun currentProject() = Project(
         clips, music, titleText, brightness, muteVideoAudio, format,
         captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
-        sourceVolume, musicVolume, voiceoverVolume
+        sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate
     )
     fun recordUndo() {
         val snapshot = currentProject()
@@ -326,6 +333,8 @@ private fun ClipForgeApp() {
         captionLanguageId = project.captionLanguageId
         muteVideoAudio = project.muteVideoAudio
         format = project.format
+        exportQuality = project.exportQuality
+        exportFrameRate = project.exportFrameRate
     }
     fun undoProject() {
         if (undoStack.isEmpty()) return
@@ -349,6 +358,8 @@ private fun ClipForgeApp() {
         sourceVolume = saved.sourceVolume
         musicVolume = saved.musicVolume
         voiceoverVolume = saved.voiceoverVolume
+        exportQuality = saved.exportQuality
+        exportFrameRate = saved.exportFrameRate
         titleText = saved.titleText
         brightness = saved.brightness
         saturation = saved.saturation
@@ -364,12 +375,12 @@ private fun ClipForgeApp() {
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, sourceVolume, musicVolume, voiceoverVolume, muteVideoAudio, format, exportQuality, exportFrameRate) {
         if (loaded) withContext(Dispatchers.IO) {
             saveProject(context, Project(
                 clips, music, titleText, brightness, muteVideoAudio, format,
                 captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId,
-                sourceVolume, musicVolume, voiceoverVolume
+                sourceVolume, musicVolume, voiceoverVolume, exportQuality, exportFrameRate
             ))
         }
     }
@@ -836,7 +847,7 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume)
+            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume, exportFrameRate)
 
             val mainSequence = if (muteVideoAudio) {
                 EditedMediaItemSequence.withVideoFrom(editItems)
@@ -863,7 +874,18 @@ private fun ClipForgeApp() {
             exporting = true
             outputUri = null
             message = "Rendering MP4 on your phone. Keep the app open until it finishes."
+            val (videoBitrate, audioBitrate) = exportBitrates(format, exportQuality)
+            val encoderFactory = DefaultEncoderFactory.Builder(context.applicationContext)
+                .setEnableFallback(true)
+                .setRequestedVideoEncoderSettings(
+                    VideoEncoderSettings.Builder().setBitrate(videoBitrate).build()
+                )
+                .setRequestedAudioEncoderSettings(
+                    AudioEncoderSettings.Builder().setBitrate(audioBitrate).build()
+                )
+                .build()
             val worker = Transformer.Builder(context.applicationContext)
+                .setEncoderFactory(encoderFactory)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(object : Transformer.Listener {
@@ -1016,7 +1038,11 @@ private fun ClipForgeApp() {
                     onFormat = { format = it },
                     onExport = ::exportVideo,
                     onCancel = { transformer?.cancel(); message = "Cancel requested…" },
-                    onShare = ::shareVideo
+                    onShare = ::shareVideo,
+                    quality = exportQuality,
+                    frameRate = exportFrameRate,
+                    onQuality = { exportQuality = it },
+                    onFrameRate = { exportFrameRate = it }
                 )
             }
                         Spacer(Modifier.height(8.dp))
@@ -1816,11 +1842,39 @@ private fun CaptionsPanel(
     }
 }
 
+private fun exportBitrates(format: String, quality: String): Pair<Int, Int> {
+    val scale = when {
+        format.contains("4K") -> 2.1f
+        format.contains("FHD") || format == "16:9 Video" -> 1f
+        format == "1:1 Square" -> 0.8f
+        else -> 0.65f
+    }
+    val videoBase = when (quality) {
+        "Saver" -> 3_000_000
+        "Standard" -> 6_000_000
+        "Ultra" -> 20_000_000
+        else -> 12_000_000
+    }
+    val audio = when (quality) {
+        "Saver" -> 96_000
+        "Standard" -> 128_000
+        "Ultra" -> 256_000
+        else -> 192_000
+    }
+    return (videoBase * scale).toInt() to audio
+}
+
+private fun qualityDescription(format: String, quality: String): String {
+    val (video, audio) = exportBitrates(format, quality)
+    return "Requested video bitrate ${video / 1_000_000f} Mbps · audio ${audio / 1_000} kbps. Encoders may adjust these values for compatibility."
+}
+
 @Composable
 private fun ExportPanel(
     clips: List<Clip>, musicName: String?, titleText: String, brightness: Float, format: String,
     exporting: Boolean, hasOutput: Boolean, message: String?,
-    onFormat: (String) -> Unit, onExport: () -> Unit, onCancel: () -> Unit, onShare: () -> Unit
+    onFormat: (String) -> Unit, onExport: () -> Unit, onCancel: () -> Unit, onShare: () -> Unit,
+    quality: String, frameRate: Int, onQuality: (String) -> Unit, onFrameRate: (Int) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Export video", fontSize = 27.sp, fontWeight = FontWeight.Bold)
@@ -1836,7 +1890,7 @@ private fun ExportPanel(
                 HorizontalDivider(color = PanelAlt)
                 Text("Canvas format", fontWeight = FontWeight.Bold)
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    listOf("Original", "9:16 Shorts", "9:16 FHD", "16:9 Video", "16:9 FHD", "1:1 Square").forEach { option ->
+                    listOf("Original", "9:16 Shorts", "9:16 FHD", "9:16 4K", "16:9 Video", "16:9 FHD", "16:9 4K", "1:1 Square").forEach { option ->
                         val selected = format == option
                         Surface(
                             modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onFormat(option) },
@@ -1847,6 +1901,39 @@ private fun ExportPanel(
                         }
                     }
                 }
+                HorizontalDivider(color = PanelAlt)
+                Text("Quality profile", fontWeight = FontWeight.Bold)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf("Saver", "Standard", "High", "Ultra").forEach { option ->
+                        val active = quality == option
+                        Surface(
+                            modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onQuality(option) },
+                            color = if (active) Lime else PanelAlt, shape = RoundedCornerShape(11.dp)
+                        ) {
+                            Text(option, modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                color = if (active) Bg else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                Text(
+                    qualityDescription(format, quality),
+                    color = Muted, fontSize = 11.sp, lineHeight = 16.sp
+                )
+                Text("Output frame-rate cap", fontWeight = FontWeight.Bold)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf(24, 30, 60).forEach { fps ->
+                        val active = frameRate == fps
+                        Surface(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(11.dp)).clickable { onFrameRate(fps) },
+                            color = if (active) Lime else PanelAlt, shape = RoundedCornerShape(11.dp)
+                        ) {
+                            Text("$fps FPS", modifier = Modifier.padding(horizontal = 7.dp, vertical = 10.dp),
+                                color = if (active) Bg else Color.White, fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                    }
+                }
+                Text("Higher resolution/quality can make exports much larger and slower. The phone's hardware encoder may lower unsupported output settings. FPS caps drop frames; they do not create optical-flow/interpolated frames.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 Text("MP4 · H.264 video · AAC audio", color = Muted, fontSize = 12.sp)
                 if (exporting) {
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Lime)
@@ -2175,7 +2262,8 @@ private fun buildEditedItems(
     saturation: Float,
     filterPreset: String,
     format: String,
-    sourceVolume: Float
+    sourceVolume: Float,
+    outputFrameRate: Int
 ): List<EditedMediaItem> {
     val result = mutableListOf<EditedMediaItem>()
     clips.forEachIndexed { clipIndex, clip ->
@@ -2320,8 +2408,10 @@ private fun buildEditedItems(
             when (format) {
                 "9:16 Shorts" -> effects.add(Presentation.createForWidthAndHeight(720, 1280, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "9:16 FHD" -> effects.add(Presentation.createForWidthAndHeight(1080, 1920, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "9:16 4K" -> effects.add(Presentation.createForWidthAndHeight(2160, 3840, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "16:9 Video" -> effects.add(Presentation.createForWidthAndHeight(1280, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "16:9 FHD" -> effects.add(Presentation.createForWidthAndHeight(1920, 1080, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+                "16:9 4K" -> effects.add(Presentation.createForWidthAndHeight(3840, 2160, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
                 "1:1 Square" -> effects.add(Presentation.createForWidthAndHeight(720, 720, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
             }
 
@@ -2335,6 +2425,7 @@ private fun buildEditedItems(
                 EditedMediaItem.Builder(mediaItem)
                     .setEffects(Effects(listOf(sourceGain), effects))
                     .setSpeed(speedProvider)
+                    .setFrameRate(outputFrameRate.coerceIn(24, 60))
                     .build()
             )
         }
@@ -2515,7 +2606,9 @@ private fun loadProject(context: Context): Project {
         captionLanguageId = p.getString("captionLanguage", "english") ?: "english",
         sourceVolume = p.getFloat("sourceVolume", 1f).coerceIn(0f, 1f),
         musicVolume = p.getFloat("musicVolume", 1f).coerceIn(0f, 1f),
-        voiceoverVolume = p.getFloat("voiceoverVolume", 1f).coerceIn(0f, 1f)
+        voiceoverVolume = p.getFloat("voiceoverVolume", 1f).coerceIn(0f, 1f),
+        exportQuality = p.getString("exportQuality", "High")?.takeIf { it in listOf("Saver", "Standard", "High", "Ultra") } ?: "High",
+        exportFrameRate = p.getInt("exportFrameRate", 30).coerceIn(24, 60).let { if (it in listOf(24, 30, 60)) it else 30 }
     )
 }
 
@@ -2581,6 +2674,8 @@ private fun saveProject(context: Context, project: Project) {
         .putFloat("sourceVolume", project.sourceVolume)
         .putFloat("musicVolume", project.musicVolume)
         .putFloat("voiceoverVolume", project.voiceoverVolume)
+        .putString("exportQuality", project.exportQuality)
+        .putInt("exportFrameRate", project.exportFrameRate)
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
