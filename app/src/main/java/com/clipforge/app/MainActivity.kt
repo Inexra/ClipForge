@@ -1383,7 +1383,7 @@ private fun ClipForgeApp() {
                     onGenerateNarration = ::generateCaptionNarration,
                     onImportSrt = { srtImportLauncher.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) },
                     onExportSrt = { srtExportLauncher.launch("ClipForge-subtitles.srt") },
-                    onEdit = { id, text -> captions = captions.map { if (it.id == id) it.copy(text = text) else it } },
+                    onEdit = { id, text -> captions = captions.map { if (it.id == id) it.copy(text = text, tokens = emptyList()) else it } },
                     onDelete = { id -> captions = captions.filterNot { it.id == id } }
                 )
                 4 -> LayersPanel(
