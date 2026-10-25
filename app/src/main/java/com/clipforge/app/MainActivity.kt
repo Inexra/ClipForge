@@ -2110,8 +2110,8 @@ private fun buildEditedItems(
                 .setEndPositionMs(clip.startMs + relativeEnd)
                 .build()
             val mediaItem = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
+            val sourceGain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
             result.add(
-                val sourceGain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
                 EditedMediaItem.Builder(mediaItem)
                     .setEffects(Effects(listOf(sourceGain), effects))
                     .setSpeed(speedProvider)
