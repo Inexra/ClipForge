@@ -152,7 +152,9 @@ object AutoCaptionEngine {
                                     pcm, bufferInfo, rate, channels, currentFormat, startUs, endUs
                                 )
                                 if (mono16k.isNotEmpty()) {
-                                    recognizer.acceptWaveForm(mono16k, mono16k.size)
+                                    if (recognizer.acceptWaveForm(mono16k, mono16k.size)) {
+                                        collectWordTimings(recognizer.getResult(), words)
+                                    }
                                     fedBytes += mono16k.size
                                     if (fedBytes - lastStatusBytes >= TARGET_RATE * 2L * 15L) {
                                         lastStatusBytes = fedBytes
