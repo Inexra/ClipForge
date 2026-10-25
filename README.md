@@ -35,7 +35,7 @@ ClipForge is a native Android video editor built with Kotlin, Jetpack Compose, E
 
 ## Captions and privacy
 
-The first automatic-caption run for each language needs an internet connection to download its small speech model (roughly 40–45 MB). Speech recognition then runs locally, and source audio/video is not uploaded to a caption service. The person-cutout model is bundled in the APK and can run offline after installation. The included models are English and Hindi only. Speech-to-text quality varies with accent, noise, source codecs, and audio quality; review all generated subtitles.
+English and Hindi speech models are bundled into the official APK. On first use, the selected model is unpacked into app-private storage, and recognition then runs entirely on-device without an internet connection. Neither source audio/video nor recognized speech is uploaded. The photo person-cutout model is also bundled and runs locally. The included models are English and Hindi only. Speech-to-text quality varies with accent, noise, source codecs, and audio quality; review all generated subtitles.
 
 Text-to-speech uses the Android speech engine installed on the phone, not a guaranteed cloud voice. Install the appropriate language voice data in Android Text-to-Speech settings when needed.
 
@@ -53,7 +53,7 @@ Every push to `main` triggers a cloud build. No paid backend or provider API key
 - Kotlin 2.2.0, Jetpack Compose, Android Gradle Plugin 8.10.1
 - JDK 17, Android SDK 36, minimum SDK 26
 - Jetpack Media3 1.11.1 for playback and video composition
-- Vosk Android for offline speech recognition after initial model downloads
+- Vosk Android with English/Hindi models bundled in the APK
 
 ## Limitations versus CapCut/VN
 
