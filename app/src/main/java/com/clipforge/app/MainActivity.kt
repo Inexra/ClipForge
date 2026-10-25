@@ -965,9 +965,15 @@ private fun ClipForgeApp() {
         recordUndo()
         val added = makeSuggestedClip(source, suggestion, clips.size + 1)
         clips = clips + added
+        val generatedCaptions = makeCaptionLines(added.id, suggestion.wordTimings, added.durationMs)
+        if (generatedCaptions.isNotEmpty()) {
+            captions = captions + generatedCaptions
+            captionStyle = "Karaoke"
+        }
         selectedId = added.id
         autoClipSuggestions = autoClipSuggestions.filterNot { it.id == suggestion.id }
-        message = "Added " + time(added.durationMs) + " highlight to the timeline."
+        message = "Added " + time(added.durationMs) + " highlight" +
+            (if (generatedCaptions.isNotEmpty()) " with timed word captions" else "") + " to the timeline."
     }
 
     fun addAllAutoClipSuggestions() {
@@ -978,9 +984,17 @@ private fun ClipForgeApp() {
             makeSuggestedClip(source, suggestion, clips.size + index + 1)
         }
         clips = clips + added
+        val generatedCaptions = added.zip(autoClipSuggestions).flatMap { (clip, suggestion) ->
+            makeCaptionLines(clip.id, suggestion.wordTimings, clip.durationMs)
+        }
+        if (generatedCaptions.isNotEmpty()) {
+            captions = captions + generatedCaptions
+            captionStyle = "Karaoke"
+        }
         selectedId = added.firstOrNull()?.id ?: selectedId
         autoClipSuggestions = emptyList()
-        message = "Added " + added.size + " offline highlights to the timeline."
+        message = "Added " + added.size + " offline highlights" +
+            (if (generatedCaptions.isNotEmpty()) " with timed word captions" else "") + " to the timeline."
     }
 
     fun commitTrim() {
@@ -1270,6 +1284,7 @@ private fun ClipForgeApp() {
                     autoClipBusy = autoClipBusy,
                     onAutoClipDuration = { autoClipDurationMs = it },
                     onGenerateAutoClips = ::generateAutoClips,
+                    onUseShortsFormat = { format = "9:16 FHD"; message = "Vertical Full HD output selected. Review horizontal clips for subject framing." },
                     onAddAutoClip = ::addAutoClipSuggestion,
                     onAddAllAutoClips = ::addAllAutoClipSuggestions
                 )
@@ -1426,6 +1441,7 @@ private fun EditorPanel(
     autoClipBusy: Boolean,
     onAutoClipDuration: (Long) -> Unit,
     onGenerateAutoClips: () -> Unit,
+    onUseShortsFormat: () -> Unit,
     onAddAutoClip: (AutoClipSuggestion) -> Unit,
     onAddAllAutoClips: () -> Unit
 ) {
@@ -1546,6 +1562,15 @@ private fun EditorPanel(
                         Spacer(Modifier.width(7.dp))
                         Text("Find highlights", fontWeight = FontWeight.Bold)
                     }
+                }
+                OutlinedButton(
+                    onClick = onUseShortsFormat,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(11.dp)
+                ) {
+                    Icon(Icons.Default.Movie, null, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text("Set vertical Shorts output (9:16 FHD)")
                 }
                 if (autoClipBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Lime)
                 if (autoClipSuggestions.isNotEmpty()) {
