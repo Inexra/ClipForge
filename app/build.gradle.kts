@@ -58,6 +58,8 @@ dependencies {
     // Offline English speech-to-text for auto captions; the acoustic model downloads on first use.
     implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    // On-device person segmentation for transparent photo cutouts in the Layers workspace.
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
