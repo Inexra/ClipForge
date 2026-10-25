@@ -54,5 +54,9 @@ dependencies {
     implementation("androidx.media3:media3-transformer:$media3Version")
     implementation("androidx.media3:media3-effect:$media3Version")
 
+    // Offline English speech-to-text for auto captions; the acoustic model downloads on first use.
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
