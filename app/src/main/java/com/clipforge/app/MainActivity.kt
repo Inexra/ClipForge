@@ -17,6 +17,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.util.Size
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.text.SpannableString
@@ -116,6 +117,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
+import androidx.media3.common.OverlaySettings
+import androidx.media3.common.VideoCompositorSettings
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.audio.SpeedProvider
@@ -314,8 +317,9 @@ private fun ClipForgeApp() {
 
     val selectedIndex = clips.indexOfFirst { it.id == selectedId }
     val selected = clips.getOrNull(selectedIndex)
-    val timelineDurationMs = clips.sumOf { (it.durationMs / it.speed).toLong() }.coerceAtLeast(1_000L)
-    val timelinePositionMs = clips.take(selectedIndex.coerceAtLeast(0)).sumOf { (it.durationMs / it.speed).toLong() } +
+    val clipStartOffsetsMs = clipTimelineStartOffsetsMs(clips)
+    val timelineDurationMs = clipTimelineDurationMs(clips).coerceAtLeast(1_000L)
+    val timelinePositionMs = (clipStartOffsetsMs.getOrNull(selectedIndex) ?: 0L) +
         if (selected != null) (position / selected.speed).toLong() else 0L
 
     fun currentProject() = Project(
@@ -897,16 +901,66 @@ private fun ClipForgeApp() {
         folder.mkdirs()
         val output = File(folder, "clipforge_" + System.currentTimeMillis() + ".mp4")
         try {
-            val editItems = buildEditedItems(context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset, format, sourceVolume, exportFrameRate, captionStyle, captionPosition, captionScale)
-
-            val mainSequence = if (muteVideoAudio) {
-                EditedMediaItemSequence.withVideoFrom(editItems)
+            val needsCrossfadeComposition = clips.dropLast(1).any { it.transition == "Crossfade" }
+            val sequenceList = mutableListOf<EditedMediaItemSequence>()
+            var compositorSettings: VideoCompositorSettings? = null
+            if (!needsCrossfadeComposition) {
+                val editItems = buildEditedItems(
+                    context, clips, captions, photoLayers, titleText, brightness, saturation, filterPreset,
+                    format, sourceVolume, exportFrameRate, captionStyle, captionPosition, captionScale
+                )
+                sequenceList.add(
+                    if (muteVideoAudio) EditedMediaItemSequence.withVideoFrom(editItems)
+                    else EditedMediaItemSequence.withAudioAndVideoFrom(editItems)
+                )
             } else {
-                EditedMediaItemSequence.withAudioAndVideoFrom(editItems)
+                val starts = clipTimelineStartOffsetsMs(clips)
+                val transparentUri = transparentFillerUri(context)
+                clips.forEachIndexed { index, clip ->
+                    val startMs = starts[index]
+                    val pad = if (startMs > 0L) {
+                        val transparentItem = MediaItem.Builder()
+                            .setUri(transparentUri)
+                            .setImageDurationMs(startMs)
+                            .build()
+                        listOf(EditedMediaItem.Builder(transparentItem).build())
+                    } else emptyList()
+                    val clipItems = buildEditedItems(
+                        context, listOf(clip), captions, photoLayers, titleText, brightness, saturation, filterPreset,
+                        format, sourceVolume, exportFrameRate, captionStyle, captionPosition, captionScale,
+                        projectOffsetStartMs = startMs,
+                        previousTransition = clips.getOrNull(index - 1)?.transition,
+                        nextTransition = clip.transition
+                    )
+                    sequenceList.add(EditedMediaItemSequence.withVideoFrom(pad + clipItems))
+                }
+                if (!muteVideoAudio) {
+                    clips.forEachIndexed { index, clip ->
+                        if (hasAudioTrack(context, clip.uri)) {
+                            val audioItems = mutableListOf<EditedMediaItem>()
+                            val startMs = starts[index]
+                            if (startMs > 0L) {
+                                audioItems.add(
+                                    EditedMediaItem.Builder(MediaItem.fromUri(silenceWavUri(context, startMs)))
+                                        .setRemoveVideo(true)
+                                        .build()
+                                )
+                            }
+                            audioItems.addAll(buildEditedAudioItems(context, clip, sourceVolume))
+                            if (audioItems.isNotEmpty()) sequenceList.add(EditedMediaItemSequence.withAudioFrom(audioItems))
+                        }
+                    }
+                }
+                val trackFades = clips.indices.map { index ->
+                    val previous = clips.getOrNull(index - 1)
+                    val fade = if (previous?.transition == "Crossfade") {
+                        crossfadeDurationMs(previous, clips[index])
+                    } else 0L
+                    VideoTrackFade(starts[index], fade)
+                }
+                compositorSettings = ClipForgeVideoCompositorSettings(trackFades)
             }
-            val sequenceList = mutableListOf(mainSequence)
             music?.let { audioUri ->
-                val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(audioUri)).build()
                 val audioGain = GainProcessor(DefaultGainProvider.Builder(musicVolume.coerceIn(0f, 1f)).build())
                 val adjustedAudio = EditedMediaItem.Builder(MediaItem.fromUri(audioUri))
                     .setEffects(Effects(listOf(audioGain), emptyList()))
@@ -920,7 +974,9 @@ private fun ClipForgeApp() {
                     .build()
                 sequenceList.add(EditedMediaItemSequence.withAudioFrom(listOf(voiceItem)))
             }
-            val composition = Composition.Builder(sequenceList).build()
+            val compositionBuilder = Composition.Builder(sequenceList)
+            compositorSettings?.let { compositionBuilder.setVideoCompositorSettings(it) }
+            val composition = compositionBuilder.build()
             exporting = true
             outputUri = null
             message = "Rendering MP4 on your phone. Keep the app open until it finishes."
@@ -1569,7 +1625,7 @@ private fun MotionPanel(
                         Text(String.format(Locale.US, "%.2fx", selected.speed), color = Lime, fontWeight = FontWeight.Bold)
                     }
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
+                        listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
                             val active = selected.speed == speed
                             Surface(
                                 modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onClipChange(selected.copy(speed = speed)) },
@@ -1731,7 +1787,7 @@ private fun MotionPanel(
                     Text("Select a clip first.", color = Muted, fontSize = 12.sp)
                 } else {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                        listOf("Cut", "Fade", "Flash", "Zoom").forEach { effect ->
+                        listOf("Cut", "Crossfade", "Fade", "Flash", "Zoom").forEach { effect ->
                             val active = selected.transition == effect
                             Surface(
                                 modifier = Modifier.clip(RoundedCornerShape(11.dp)).clickable { onClipChange(selected.copy(transition = effect)) },
@@ -1743,7 +1799,7 @@ private fun MotionPanel(
                             }
                         }
                     }
-                    Text("Fade and flash use short edge effects; Zoom adds a push-in. Media3 currently doesn't support overlapping crossfade tracks, so these presets are rendered as cut-safe transitions.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                    Text("Crossfade blends the next clip over the outgoing clip on a separate video track during export. Preview remains clip-based; Fade, Flash and Zoom are edge effects.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                 }
             }
         }
@@ -2614,17 +2670,20 @@ private fun buildEditedItems(
     outputFrameRate: Int,
     captionStyle: String,
     captionPosition: String,
-    captionScale: Float
+    captionScale: Float,
+    projectOffsetStartMs: Long = 0L,
+    previousTransition: String? = null,
+    nextTransition: String? = null
 ): List<EditedMediaItem> {
     val result = mutableListOf<EditedMediaItem>()
     clips.forEachIndexed { clipIndex, clip ->
         val duration = clip.durationMs.coerceAtLeast(1L)
-        val projectOffsetMs = clips.take(clipIndex).sumOf { (it.durationMs / it.speed).toLong() }
+        val projectOffsetMs = projectOffsetStartMs + clips.take(clipIndex).sumOf { renderedDurationEstimateMs(it) }
         val projectClipEndMs = projectOffsetMs + (duration / clip.speed).toLong()
         val activeCaptions = captions.filter { it.clipId == clip.id && it.endMs > 0L && it.startMs < duration }
         val activePhotoLayers = photoLayers.filter { it.endMs > projectOffsetMs && it.startMs < projectClipEndMs }
-        val transitionIn = clips.getOrNull(clipIndex - 1)?.transition ?: "Cut"
-        val transitionOut = if (clipIndex < clips.lastIndex) clip.transition else "Cut"
+        val transitionIn = previousTransition ?: clips.getOrNull(clipIndex - 1)?.transition ?: "Cut"
+        val transitionOut = nextTransition ?: if (clipIndex < clips.lastIndex) clip.transition else "Cut"
         val transitionLength = minOf(400L, (duration / 3L).coerceAtLeast(0L))
         val boundaries = sortedSetOf(0L, duration)
 
@@ -2785,6 +2844,203 @@ private fun buildEditedItems(
     return result
 }
 
+
+private data class VideoTrackFade(val startMs: Long, val fadeInMs: Long)
+
+private class ClipForgeVideoCompositorSettings(
+    private val tracks: List<VideoTrackFade>
+) : VideoCompositorSettings {
+    override fun getOutputSize(inputSizes: MutableList<Size>): Size {
+        return inputSizes.firstOrNull() ?: Size(720, 1280)
+    }
+
+    override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+        val track = tracks.getOrNull(inputId) ?: VideoTrackFade(0L, 0L)
+        val timeMs = presentationTimeUs / 1_000L
+        val alpha = when {
+            timeMs < track.startMs -> 0f
+            track.fadeInMs > 0L && timeMs < track.startMs + track.fadeInMs ->
+                ((timeMs - track.startMs).toFloat() / track.fadeInMs.toFloat()).coerceIn(0f, 1f)
+            else -> 1f
+        }
+        return StaticOverlaySettings.Builder()
+            .setAlphaScale(alpha)
+            .setScale(1f, 1f)
+            .setBackgroundFrameAnchor(0f, 0f)
+            .setOverlayFrameAnchor(0f, 0f)
+            .build()
+    }
+}
+
+private fun renderedDurationEstimateMs(clip: Clip): Long {
+    val duration = clip.durationMs.coerceAtLeast(1L)
+    var result = 0.0
+    for (step in 0 until 13) {
+        val start = duration * step / 13L
+        val end = duration * (step + 1) / 13L
+        if (end <= start) continue
+        val mid = (start + end) / 2f
+        val fraction = (mid / duration.toFloat()).coerceIn(0f, 1f)
+        val curve = when (clip.speedCurve) {
+            "Ramp up" -> 0.5f + 1.5f * fraction
+            "Ramp down" -> 2.0f - 1.5f * fraction
+            "Ease in/out" -> 0.5f + 1.5f * kotlin.math.sin(Math.PI.toFloat() * fraction)
+            "Pulse" -> (1.0f + 0.65f * kotlin.math.sin(fraction * (Math.PI.toFloat() * 4f))).coerceAtLeast(0.25f)
+            else -> 1f
+        }
+        val speed = (clip.speed * curve).coerceIn(0.25f, 3f)
+        result += (end - start).toDouble() / speed
+    }
+    return result.toLong().coerceAtLeast(1L)
+}
+
+private fun crossfadeDurationMs(outgoing: Clip, incoming: Clip): Long {
+    val outDuration = renderedDurationEstimateMs(outgoing)
+    val inDuration = renderedDurationEstimateMs(incoming)
+    return minOf(450L, outDuration / 3L, inDuration / 3L).coerceAtLeast(0L)
+}
+
+private fun clipTimelineStartOffsetsMs(clips: List<Clip>): List<Long> {
+    val starts = ArrayList<Long>(clips.size)
+    var offset = 0L
+    clips.forEachIndexed { index, clip ->
+        starts.add(offset)
+        offset += renderedDurationEstimateMs(clip)
+        if (index < clips.lastIndex && clip.transition == "Crossfade") {
+            offset -= crossfadeDurationMs(clip, clips[index + 1])
+        }
+    }
+    return starts
+}
+
+private fun clipTimelineDurationMs(clips: List<Clip>): Long {
+    if (clips.isEmpty()) return 1_000L
+    return clipTimelineStartOffsetsMs(clips).last() + renderedDurationEstimateMs(clips.last())
+}
+
+private fun transparentFillerUri(context: Context): Uri {
+    val file = File(context.cacheDir, "clipforge_transparent_filler.png")
+    if (!file.exists() || file.length() < 20L) {
+        val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(AndroidColor.TRANSPARENT)
+            file.outputStream().use { stream ->
+                if (!bitmap.compress(CompressFormat.PNG, 100, stream)) {
+                    throw IllegalStateException("Could not prepare the crossfade filler image.")
+                }
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+    return Uri.fromFile(file)
+}
+
+private fun hasAudioTrack(context: Context, uri: Uri): Boolean {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+            ?.equals("yes", ignoreCase = true) == true
+    } catch (_: Exception) {
+        false
+    } finally {
+        runCatching { retriever.release() }
+    }
+}
+
+private fun silenceWavUri(context: Context, durationMs: Long): Uri {
+    val boundedMs = durationMs.coerceAtLeast(1L)
+    val file = File(context.cacheDir, "clipforge_silence_" + boundedMs + "ms.wav")
+    if (!file.exists() || file.length() < 44L) {
+        val sampleRate = 8_000
+        val channels = 1
+        val bits = 16
+        val sampleCount = (sampleRate.toLong() * boundedMs / 1_000L).coerceAtLeast(1L)
+        val dataLengthLong = sampleCount * channels * bits / 8
+        require(dataLengthLong <= Int.MAX_VALUE - 36L) { "Timeline too long to prepare silent audio padding." }
+        val dataLength = dataLengthLong.toInt()
+        file.outputStream().buffered().use { out ->
+            fun writeAscii(value: String) { out.write(value.toByteArray(Charsets.US_ASCII)) }
+            fun writeIntLE(value: Int) {
+                out.write(value and 0xFF)
+                out.write((value ushr 8) and 0xFF)
+                out.write((value ushr 16) and 0xFF)
+                out.write((value ushr 24) and 0xFF)
+            }
+            fun writeShortLE(value: Int) {
+                out.write(value and 0xFF)
+                out.write((value ushr 8) and 0xFF)
+            }
+            writeAscii("RIFF")
+            writeIntLE(36 + dataLength)
+            writeAscii("WAVE")
+            writeIntLE(16)
+            writeShortLE(1)
+            writeShortLE(channels)
+            writeIntLE(sampleRate)
+            writeIntLE(sampleRate * channels * bits / 8)
+            writeShortLE(channels * bits / 8)
+            writeShortLE(bits)
+            writeAscii("data")
+            writeIntLE(dataLength)
+            val zeros = ByteArray(16 * 1024)
+            var remaining = dataLength
+            while (remaining > 0) {
+                val size = minOf(zeros.size, remaining)
+                out.write(zeros, 0, size)
+                remaining -= size
+            }
+        }
+    }
+    return Uri.fromFile(file)
+}
+
+private fun buildEditedAudioItems(
+    context: Context,
+    clip: Clip,
+    sourceVolume: Float
+): List<EditedMediaItem> {
+    val result = mutableListOf<EditedMediaItem>()
+    val duration = clip.durationMs.coerceAtLeast(1L)
+    val boundaries = sortedSetOf(0L, duration)
+    for (step in 1..12) boundaries.add(duration * step / 13L)
+    val points = boundaries.toList()
+    for (pointIndex in 0 until points.lastIndex) {
+        val relativeStart = points[pointIndex]
+        val relativeEnd = points[pointIndex + 1]
+        if (relativeEnd <= relativeStart) continue
+        val mid = (relativeStart + relativeEnd) / 2f
+        val fraction = (mid / duration.toFloat()).coerceIn(0f, 1f)
+        val speedFactor = when (clip.speedCurve) {
+            "Ramp up" -> 0.5f + 1.5f * fraction
+            "Ramp down" -> 2.0f - 1.5f * fraction
+            "Ease in/out" -> 0.5f + 1.5f * kotlin.math.sin(Math.PI.toFloat() * fraction)
+            "Pulse" -> (1.0f + 0.65f * kotlin.math.sin(fraction * (Math.PI.toFloat() * 4f))).coerceAtLeast(0.25f)
+            else -> 1f
+        }
+        val segmentSpeed = (clip.speed * speedFactor).coerceIn(0.25f, 3f)
+        val speedProvider = object : SpeedProvider {
+            override fun getSpeed(timeUs: Long): Float = segmentSpeed
+            override fun getNextSpeedChangeTimeUs(timeUs: Long): Long = C.TIME_UNSET
+        }
+        val clipping = MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionMs(clip.startMs + relativeStart)
+            .setEndPositionMs(clip.startMs + relativeEnd)
+            .build()
+        val item = MediaItem.Builder().setUri(clip.uri).setClippingConfiguration(clipping).build()
+        val gain = GainProcessor(DefaultGainProvider.Builder(sourceVolume.coerceIn(0f, 1f)).build())
+        result.add(
+            EditedMediaItem.Builder(item)
+                .setRemoveVideo(true)
+                .setEffects(Effects(listOf(gain), emptyList()))
+                .setSpeed(speedProvider)
+                .build()
+        )
+    }
+    return result
+}
+
 private fun toSrtTimestamp(milliseconds: Long): String {
     val total = milliseconds.coerceAtLeast(0L)
     val hours = total / 3_600_000L
@@ -2888,7 +3144,7 @@ private fun loadProject(context: Context): Project {
                     rotationMid = o.optDouble("rotationMid", 0.0).toFloat().coerceIn(-180f, 180f),
                     rotationEnd = o.optDouble("rotationEnd", 0.0).toFloat().coerceIn(-180f, 180f),
                     motionCurve = o.optString("motionCurve", "Linear").takeIf { it in listOf("Linear", "Ease in", "Ease out", "Ease in/out") } ?: "Linear",
-                    transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Fade", "Flash", "Zoom") } ?: "Cut",
+                    transition = o.optString("transition", "Cut").takeIf { it in listOf("Cut", "Crossfade", "Fade", "Flash", "Zoom") } ?: "Cut",
                     speedCurve = o.optString("speedCurve", "Constant").takeIf { it in listOf("Constant", "Ramp up", "Ramp down", "Ease in/out", "Pulse") } ?: "Constant",
                     cropZoom = o.optDouble("cropZoom", 1.0).toFloat().coerceIn(1f, 2.5f),
                     cropX = o.optDouble("cropX", 0.0).toFloat().coerceIn(-1f, 1f),
