@@ -42,6 +42,19 @@ jobs:
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
           "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Bundle offline speech models
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_DIR="app/src/main/assets/offline-caption-models"
+          mkdir -p "$ASSET_DIR"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" \
+            --output "$ASSET_DIR/vosk-model-small-en-us-0.15.zip"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "https://alphacephei.com/vosk/models/vosk-model-small-hi-0.22.zip" \
+            --output "$ASSET_DIR/vosk-model-small-hi-0.22.zip"
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
