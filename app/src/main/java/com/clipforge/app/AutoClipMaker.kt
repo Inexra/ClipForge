@@ -17,7 +17,8 @@ data class AutoClipSuggestion(
     val endMs: Long,
     val score: Int,
     val reason: String,
-    val transcriptExcerpt: String
+    val transcriptExcerpt: String,
+    val wordTimings: List<WordTiming> = emptyList()
 )
 
 /**
@@ -41,6 +42,8 @@ object AutoClipMaker {
         val targetMs = min(targetDurationMs.coerceIn(8_000L, 60_000L), durationMs)
         onStatus("Scanning scene changes locally…")
         val sceneEvents = detectSceneChanges(context, uri, sourceStartMs, durationMs, onStatus)
+        onStatus("Analyzing audio peaks locally…")
+        val audioPeaks = runCatching { OfflineWaveformAnalyzer.analyze(context, uri, 180) }.getOrDefault(emptyList())
 
         var words = emptyList<WordTiming>()
         try {
@@ -89,21 +92,42 @@ object AutoClipMaker {
             val keywordScore = (keywordHits * 7f).coerceAtMost(28f)
             val wordVariety = (normalizedTokens.filter { it.length >= 4 }.distinct().size * 0.35f).coerceAtMost(8f)
             val boundaryScore = if (sceneEvents.any { abs(it.timeMs - start) < 1_500L }) 4f else 0f
-            val score = (speechScore + keywordScore + sceneScore + wordVariety + boundaryScore).toInt()
+            val segmentPeaks = if (audioPeaks.isEmpty()) emptyList() else {
+                val firstPeak = ((start.toDouble() / durationMs.coerceAtLeast(1L)) * audioPeaks.size).toInt().coerceIn(0, audioPeaks.lastIndex)
+                val lastPeak = ((((end.toDouble() / durationMs.coerceAtLeast(1L)) * audioPeaks.size).toInt() + 1).coerceIn(firstPeak + 1, audioPeaks.size))
+                audioPeaks.subList(firstPeak, lastPeak)
+            }
+            val peakValue = segmentPeaks.maxOrNull() ?: 0f
+            val peakScore = peakValue * 10f
+            val energyAverage = if (segmentPeaks.isEmpty()) 0f else segmentPeaks.average().toFloat()
+            val energyContrast = (peakValue - energyAverage).coerceAtLeast(0f) * 6f
+            val speechPauses = segmentWords.zipWithNext().count { (left, right) -> right.startMs - left.endMs >= 450L }
+            val pauseScore = speechPauses.coerceAtMost(3) * 1.5f
+            val score = (speechScore + keywordScore + sceneScore + wordVariety + boundaryScore + peakScore + energyContrast + pauseScore).toInt()
             val reason = when {
                 keywordHits > 0 && segmentScenes.isNotEmpty() -> "Key phrase + visual change"
+                keywordHits > 0 && (peakScore + energyContrast) > 5f -> "Interesting speech + audio peak"
                 keywordHits > 0 -> "Interesting speech detected"
+                segmentScenes.size >= 3 && peakScore > 4f -> "Visual change + audio peak"
                 segmentScenes.size >= 3 -> "High visual activity"
                 segmentScenes.isNotEmpty() -> "Scene changes detected"
                 segmentWords.size >= 8 -> "Speech-rich moment"
+                peakScore > 7f -> "Audio peak detected"
                 else -> "Suggested highlight window"
+            }
+            val relativeWords = segmentWords.mapNotNull { word ->
+                val clippedStart = max(word.startMs, start)
+                val clippedEnd = min(word.endMs, end)
+                if (clippedEnd <= clippedStart) null
+                else WordTiming(word.text, clippedStart - start, clippedEnd - start)
             }
             AutoClipSuggestion(
                 startMs = start,
                 endMs = end,
                 score = score,
                 reason = reason,
-                transcriptExcerpt = segmentText.take(140)
+                transcriptExcerpt = segmentText.take(140),
+                wordTimings = relativeWords
             )
         }.sortedWith(compareByDescending<AutoClipSuggestion> { it.score }.thenBy { it.startMs })
 
