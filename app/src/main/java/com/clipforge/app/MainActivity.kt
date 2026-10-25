@@ -485,6 +485,41 @@ private fun ClipForgeApp() {
         }
     }
 
+    val projectExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    message = "Packing project settings and source media into a portable archive…"
+                    val snapshot = currentProject()
+                    withContext(Dispatchers.IO) {
+                        saveProject(context, snapshot)
+                        ProjectArchive.export(context, uri)
+                    }
+                    message = "Project bundle saved. It includes the media used by this edit."
+                } catch (error: Exception) {
+                    message = "Project bundle export failed: " + (error.message ?: "file access error")
+                }
+            }
+        }
+    }
+
+    val projectImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    recordUndo()
+                    message = "Opening project bundle and restoring its media…"
+                    withContext(Dispatchers.IO) { ProjectArchive.import(context, uri) }
+                    val restored = withContext(Dispatchers.IO) { loadProject(context) }
+                    restoreProject(restored)
+                    message = "Project opened with its packaged media and edit settings."
+                } catch (error: Exception) {
+                    message = "Project import failed: " + (error.message ?: "invalid project archive")
+                }
+            }
+        }
+    }
+
     val photoLayerPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             uris.forEach { uri ->
@@ -615,6 +650,8 @@ private fun ClipForgeApp() {
         }
     }
 
+    fun exportProjectBundle() { projectExportLauncher.launch("ClipForge_Project.zip") }
+    fun openProjectBundle() { projectImportLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }
     fun importVideos() { videoPicker.launch(arrayOf("video/*")) }
     fun importMusic() { musicPicker.launch(arrayOf("audio/*")) }
     fun importPhotoLayers() { photoLayerPicker.launch(arrayOf("image/*")) }
@@ -878,6 +915,8 @@ private fun ClipForgeApp() {
                     clips, selectedId, selectedIndex, selected, player, position, trimStart, trimEnd, titleText, captions, photoLayers, message,
                     canUndo = undoStack.isNotEmpty(), canRedo = redoStack.isNotEmpty(),
                     onUndo = ::undoProject, onRedo = ::redoProject,
+                    onSaveProjectBundle = ::exportProjectBundle,
+                    onOpenProjectBundle = ::openProjectBundle,
                     onImport = ::importVideos,
                     onFreeze = ::freezeFrameSelected,
                     onSelect = { selectedId = it },
@@ -1001,6 +1040,7 @@ private fun EditorPanel(
     position: Long, trimStart: Long, trimEnd: Long, titleText: String, captions: List<CaptionLine>,
     photoLayers: List<PhotoLayer>, message: String?,
     canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
+    onSaveProjectBundle: () -> Unit, onOpenProjectBundle: () -> Unit,
     onImport: () -> Unit, onFreeze: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit
@@ -1026,6 +1066,24 @@ private fun EditorPanel(
             OutlinedButton(onClick = onRedo, enabled = canRedo, shape = RoundedCornerShape(11.dp),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 7.dp)) {
                 Text("Redo")
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onSaveProjectBundle,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 9.dp)
+            ) {
+                Text("Export project", fontSize = 10.sp, maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onOpenProjectBundle,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 9.dp)
+            ) {
+                Text("Open project", fontSize = 10.sp, maxLines = 1)
             }
         }
         if (selected == null) {
