@@ -199,7 +199,8 @@ private data class Project(
     val filterPreset: String,
     val photoLayers: List<PhotoLayer> = emptyList(),
     val voiceover: Uri? = null,
-    val beatMarkers: List<Long> = emptyList()
+    val beatMarkers: List<Long> = emptyList(),
+    val captionLanguageId: String = "english"
 )
 
 class MainActivity : ComponentActivity() {
@@ -233,6 +234,7 @@ private fun ClipForgeApp() {
     var filterPreset by remember { mutableStateOf("None") }
     var captions by remember { mutableStateOf<List<CaptionLine>>(emptyList()) }
     var captioning by remember { mutableStateOf(false) }
+    var captionLanguageId by remember { mutableStateOf("english") }
     var photoLayers by remember { mutableStateOf<List<PhotoLayer>>(emptyList()) }
     var voiceover by remember { mutableStateOf<Uri?>(null) }
     var voiceoverName by remember { mutableStateOf<String?>(null) }
@@ -275,7 +277,7 @@ private fun ClipForgeApp() {
 
     fun currentProject() = Project(
         clips, music, titleText, brightness, muteVideoAudio, format,
-        captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers
+        captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId
     )
     fun recordUndo() {
         val snapshot = currentProject()
@@ -297,6 +299,7 @@ private fun ClipForgeApp() {
         voiceover = project.voiceover
         voiceoverName = project.voiceover?.let { nameForUri(context, it) }
         beatMarkers = project.beatMarkers
+        captionLanguageId = project.captionLanguageId
         muteVideoAudio = project.muteVideoAudio
         format = project.format
     }
@@ -328,16 +331,17 @@ private fun ClipForgeApp() {
         voiceover = saved.voiceover
         voiceoverName = saved.voiceover?.let { nameForUri(context, it) }
         beatMarkers = saved.beatMarkers
+        captionLanguageId = saved.captionLanguageId
         muteVideoAudio = saved.muteVideoAudio
         format = saved.format
         loaded = true
     }
 
-    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, muteVideoAudio, format) {
+    LaunchedEffect(loaded, clips, music, titleText, brightness, saturation, filterPreset, captions, photoLayers, voiceover, beatMarkers, captionLanguageId, muteVideoAudio, format) {
         if (loaded) withContext(Dispatchers.IO) {
             saveProject(context, Project(
                 clips, music, titleText, brightness, muteVideoAudio, format,
-                captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers
+                captions, saturation, filterPreset, photoLayers, voiceover, beatMarkers, captionLanguageId
             ))
         }
     }
@@ -555,7 +559,11 @@ private fun ClipForgeApp() {
             try {
                 val generated = withContext(Dispatchers.IO) {
                     val sources = clips.map { CaptionSource(it.id, it.uri, it.startMs, it.endMs) }
-                    val wordMap = AutoCaptionEngine.transcribeAll(context, sources) { status ->
+                    val wordMap = AutoCaptionEngine.transcribeAll(
+                        context,
+                        sources,
+                        CaptionLanguage.fromId(captionLanguageId)
+                    ) { status ->
                         scope.launch { message = status }
                     }
                     clips.flatMap { clip ->
@@ -773,6 +781,8 @@ private fun ClipForgeApp() {
                 )
                 3 -> CaptionsPanel(
                     captions, clips, captioning, message,
+                    captionLanguageId = captionLanguageId,
+                    onLanguageChange = { captionLanguageId = it },
                     onAutoCaption = ::generateAutoCaptions,
                     onImportSrt = { srtImportLauncher.launch(arrayOf("application/x-subrip", "text/plain", "application/octet-stream")) },
                     onExportSrt = { srtExportLauncher.launch("ClipForge-subtitles.srt") },
@@ -1301,6 +1311,8 @@ private fun CaptionsPanel(
     clips: List<Clip>,
     captioning: Boolean,
     message: String?,
+    captionLanguageId: String,
+    onLanguageChange: (String) -> Unit,
     onAutoCaption: () -> Unit,
     onImportSrt: () -> Unit,
     onExportSrt: () -> Unit,
@@ -1309,7 +1321,7 @@ private fun CaptionsPanel(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Captions studio", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-        Text("Generate timestamped English subtitles offline, edit the lines, or import/export SRT.", color = Muted, fontSize = 13.sp)
+        Text("Generate timestamped subtitles offline in English or Hindi, edit the lines, or import/export SRT.", color = Muted, fontSize = 13.sp)
         Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = Panel)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1317,7 +1329,30 @@ private fun CaptionsPanel(
                     Spacer(Modifier.width(9.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("On-device auto captions", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Text("English speech model · stored on this phone after first download", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                        Text(
+                            (if (captionLanguageId == "hindi") "Hindi" else "English") +
+                                " speech model · stored on this phone after first download",
+                            color = Muted, fontSize = 11.sp, lineHeight = 16.sp
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("english" to "English", "hindi" to "हिन्दी / Hindi").forEach { (id, label) ->
+                        val active = captionLanguageId == id
+                        Surface(
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(11.dp)).clickable(enabled = !captioning) { onLanguageChange(id) },
+                            color = if (active) Lime else PanelAlt,
+                            shape = RoundedCornerShape(11.dp)
+                        ) {
+                            Text(
+                                label,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                color = if (active) Bg else Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
                     }
                 }
                 Button(
@@ -1349,7 +1384,10 @@ private fun CaptionsPanel(
                         Text("Export SRT")
                     }
                 }
-                Text("The first caption run downloads a small English speech model (around 40 MB). Speech is decoded and transcribed locally; no video is uploaded to a caption server.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                Text(
+                    "The first run downloads the selected speech model (about 40–45 MB). Speech is decoded and transcribed locally; no video is uploaded to a caption server. Model availability and recognition accuracy vary by language and audio quality.",
+                    color = Muted, fontSize = 11.sp, lineHeight = 16.sp
+                )
             }
         }
 
@@ -2041,7 +2079,8 @@ private fun loadProject(context: Context): Project {
         filterPreset = p.getString("filterPreset", "None") ?: "None",
         photoLayers = layerList,
         voiceover = p.getString("voiceover", null)?.let { Uri.parse(it) },
-        beatMarkers = markers.sorted()
+        beatMarkers = markers.sorted(),
+        captionLanguageId = p.getString("captionLanguage", "english") ?: "english"
     )
 }
 
@@ -2095,6 +2134,7 @@ private fun saveProject(context: Context, project: Project) {
         .putString("photoLayers", layerArray.toString())
         .putString("voiceover", project.voiceover?.toString())
         .putString("beatMarkers", markerArray.toString())
+        .putString("captionLanguage", project.captionLanguageId)
         .putString("music", project.music?.toString())
         .putString("title", project.titleText)
         .putFloat("brightness", project.brightness)
