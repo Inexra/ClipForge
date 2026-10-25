@@ -1373,6 +1373,8 @@ private fun EditorPanel(
     onImport: () -> Unit, onFreeze: () -> Unit, onSelect: (String) -> Unit, onSeek: (Long) -> Unit, onPlay: () -> Unit,
     onStartChange: (Long) -> Unit, onEndChange: (Long) -> Unit, onTrim: () -> Unit,
     onSplit: () -> Unit, onDelete: () -> Unit, onMove: (Int) -> Unit, onAdd: () -> Unit,
+    beatMarkers: List<Long>, timelineZoom: Float, snapToBeats: Boolean,
+    onTimelineZoom: (Float) -> Unit, onToggleSnap: () -> Unit,
     autoClipSuggestions: List<AutoClipSuggestion>,
     autoClipSourceName: String?,
     autoClipDurationMs: Long,
@@ -1646,6 +1648,26 @@ private fun EditorPanel(
                     Spacer(Modifier.weight(1f))
                     Text(clips.size.toString() + " clips · " + time(clips.sumOf { it.durationMs }), color = Lime, fontSize = 11.sp)
                 }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Surface(
+                        modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { onToggleSnap() },
+                        color = if (snapToBeats) Color(0xFF28351E) else PanelAlt,
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Row(Modifier.padding(horizontal = 9.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.CheckCircle, null, tint = if (snapToBeats) Lime else Muted, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(if (snapToBeats) "Beat snap on" else "Beat snap off", color = if (snapToBeats) Lime else Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Text("Timeline zoom", color = Muted, fontSize = 10.sp)
+                    Slider(
+                        value = timelineZoom,
+                        onValueChange = onTimelineZoom,
+                        valueRange = 0.75f..1.8f,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(9.dp),
@@ -1656,6 +1678,7 @@ private fun EditorPanel(
                             clip = clip,
                             index = index,
                             selected = clip.id == selectedId,
+                            widthScale = timelineZoom,
                             onClick = { onSelect(clip.id) }
                         )
                     }
@@ -2592,6 +2615,35 @@ private fun Summary(label: String, value: String) {
     }
 }
 
+private fun snapTrimToBeat(clip: Clip, editedSourceMs: Long, clipOffsetMs: Long, beatMarkers: List<Long>): Long {
+    if (beatMarkers.isEmpty()) return editedSourceMs
+    val targetTimelineMs = clipOffsetMs + ((editedSourceMs - clip.startMs) / clip.speed).toLong()
+    val nearest = beatMarkers.minByOrNull { kotlin.math.abs(it - targetTimelineMs) } ?: return editedSourceMs
+    if (kotlin.math.abs(nearest - targetTimelineMs) > 320L) return editedSourceMs
+    return (clip.startMs + ((nearest - clipOffsetMs) * clip.speed).toLong())
+        .coerceIn(0L, clip.sourceMs)
+}
+
+@Composable
+private fun WaveformBars(peaks: List<Float>, modifier: Modifier = Modifier) {
+    if (peaks.isEmpty()) return
+    Canvas(modifier) {
+        val slot = size.width / peaks.size.toFloat()
+        val stroke = (slot * 0.62f).coerceAtLeast(1.2f)
+        peaks.forEachIndexed { index, peak ->
+            val amplitude = (peak.coerceIn(0f, 1f) * size.height * 0.9f).coerceAtLeast(2f)
+            val x = slot * index + slot / 2f
+            drawLine(
+                color = Lime,
+                start = Offset(x, size.height / 2f - amplitude / 2f),
+                end = Offset(x, size.height / 2f + amplitude / 2f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
 private fun layerAnchors(position: String): Pair<Float, Float> = when (position) {
     "top-left" -> -0.62f to 0.62f
     "top-right" -> 0.62f to 0.62f
@@ -2802,7 +2854,7 @@ private fun TimelineThumbnail(clip: Clip) {
 }
 
 @Composable
-private fun TimelineClipCard(clip: Clip, index: Int, selected: Boolean, onClick: () -> Unit) {
+private fun TimelineClipCard(clip: Clip, index: Int, selected: Boolean, widthScale: Float = 1f, onClick: () -> Unit) {
     val cardBackground by animateColorAsState(
         targetValue = if (selected) Color(0xFF263223) else Panel,
         animationSpec = tween(160),
@@ -2814,7 +2866,7 @@ private fun TimelineClipCard(clip: Clip, index: Int, selected: Boolean, onClick:
         label = "timeline-card-selection"
     )
     Column(
-        Modifier.width(122.dp).clip(RoundedCornerShape(12.dp)).background(cardBackground)
+        Modifier.width((122f * widthScale.coerceIn(0.75f, 1.8f)).dp).clip(RoundedCornerShape(12.dp)).background(cardBackground)
             .clickable(onClick = onClick).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
