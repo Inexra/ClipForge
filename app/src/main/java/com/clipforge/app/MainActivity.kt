@@ -268,6 +268,7 @@ private fun ClipForgeApp() {
     var trimStart by remember { mutableStateOf(0L) }
     var trimEnd by remember { mutableStateOf(0L) }
     var musicPlaying by remember { mutableStateOf(false) }
+    var beatDetecting by remember { mutableStateOf(false) }
 
     val player = remember(context) { ExoPlayer.Builder(context).build() }
     val audioPlayer = remember(context) { ExoPlayer.Builder(context).build() }
@@ -655,6 +656,47 @@ private fun ClipForgeApp() {
         }
     }
 
+    fun detectMusicBeats() {
+        val audioUri = music
+        if (audioUri == null) {
+            message = "Choose a background music file first."
+            return
+        }
+        if (beatDetecting) return
+        beatDetecting = true
+        scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    BeatDetectionEngine.detect(context, audioUri) { status ->
+                        scope.launch { message = status }
+                    }
+                }
+                val markers = mutableListOf<Long>()
+                val trackDuration = result.durationMs.coerceAtLeast(1L)
+                var offset = 0L
+                while (offset < timelineDurationMs && markers.size < 400) {
+                    result.beatMarkersMs.forEach { marker ->
+                        val value = offset + marker
+                        if (value < timelineDurationMs && markers.size < 400) markers.add(value)
+                    }
+                    offset += trackDuration
+                }
+                recordUndo()
+                beatMarkers = markers.distinct().sorted()
+                message = if (beatMarkers.isEmpty()) {
+                    "No prominent beats found. You can add markers manually while listening."
+                } else {
+                    "Detected " + result.beatMarkersMs.size + " beat peaks and aligned " + beatMarkers.size +
+                        " markers across the current timeline. Review peaks before cutting."
+                }
+            } catch (error: Exception) {
+                message = "Beat detection failed: " + (error.message ?: "unsupported audio file")
+            } finally {
+                beatDetecting = false
+            }
+        }
+    }
+
     fun generateCaptionNarration() {
         if (ttsGenerating) return
         if (captions.isEmpty()) {
@@ -861,6 +903,7 @@ private fun ClipForgeApp() {
                     musicVolume = musicVolume,
                     voiceoverVolume = voiceoverVolume,
                     beatMarkers = beatMarkers,
+                    beatDetecting = beatDetecting,
                     timelinePositionMs = timelinePositionMs,
                     timelineDurationMs = timelineDurationMs,
                     onPick = ::importMusic,
@@ -888,6 +931,7 @@ private fun ClipForgeApp() {
                         beatMarkers = (beatMarkers + timelinePositionMs.coerceIn(0L, timelineDurationMs)).distinct().sorted()
                         message = "Beat marker added at " + time(timelinePositionMs) + "."
                     },
+                    onDetectBeats = ::detectMusicBeats,
                     onDeleteBeat = { marker ->
                         recordUndo()
                         beatMarkers = beatMarkers.filterNot { it == marker }
@@ -1148,11 +1192,11 @@ private fun AudioPanel(
     musicName: String?, hasMusic: Boolean, playing: Boolean, muted: Boolean, message: String?,
     voiceoverName: String?, hasVoiceover: Boolean, voiceoverRecording: Boolean,
     sourceVolume: Float, musicVolume: Float, voiceoverVolume: Float,
-    beatMarkers: List<Long>, timelinePositionMs: Long, timelineDurationMs: Long,
+    beatMarkers: List<Long>, beatDetecting: Boolean, timelinePositionMs: Long, timelineDurationMs: Long,
     onPick: () -> Unit, onRemove: () -> Unit, onPreview: () -> Unit, onMute: (Boolean) -> Unit,
     onSourceVolume: (Float) -> Unit, onMusicVolume: (Float) -> Unit, onVoiceoverVolume: (Float) -> Unit,
     onStartVoiceover: () -> Unit, onStopVoiceover: () -> Unit, onRemoveVoiceover: () -> Unit,
-    onMarkBeat: () -> Unit, onDeleteBeat: (Long) -> Unit
+    onMarkBeat: () -> Unit, onDetectBeats: () -> Unit, onDeleteBeat: (Long) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(15.dp)) {
         Text("Sound & music", fontSize = 27.sp, fontWeight = FontWeight.Bold)
@@ -1251,6 +1295,16 @@ private fun AudioPanel(
                     Icon(Icons.Default.Add, null)
                     Spacer(Modifier.width(6.dp))
                     Text("Mark current beat")
+                }
+                OutlinedButton(
+                    onClick = onDetectBeats,
+                    enabled = hasMusic && !beatDetecting,
+                    modifier = Modifier.fillMaxWidth().height(45.dp),
+                    shape = RoundedCornerShape(13.dp)
+                ) {
+                    Icon(Icons.Default.AutoAwesome, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (beatDetecting) "Analyzing music…" else "Auto-detect beats in music")
                 }
                 if (beatMarkers.isEmpty()) {
                     Text("No markers yet · total timeline " + time(timelineDurationMs), color = Muted, fontSize = 11.sp)
