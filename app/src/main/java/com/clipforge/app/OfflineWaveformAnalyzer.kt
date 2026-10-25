@@ -20,7 +20,7 @@ object OfflineWaveformAnalyzer {
         var durationUs = 0L
         var framesSeen = 0L
         try {
-            extractor.setDataSource(context, uri)
+            extractor.setDataSource(context, uri, null)
             var audioTrack = -1
             var audioFormat: MediaFormat? = null
             for (i in 0 until extractor.trackCount) {
